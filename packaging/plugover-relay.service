@@ -1,0 +1,18 @@
+[Unit]
+Description=Plugover relay: lends USB devices to paired hosts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/plugover relay
+Restart=on-failure
+RestartSec=2
+StateDirectory=plugover
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

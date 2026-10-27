@@ -1,0 +1,153 @@
+# Hand-picked devices whose USB database names are unhelpful or whose type the
+# HID descriptor does not reveal (many wheels report as a plain joystick).
+# Add an entry only when you have verified the vendor:product id.
+
+[[device]]
+id = "046d:c299"
+name = "G25 Racing Wheel"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:c29a"
+name = "Driving Force GT"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:c29b"
+name = "G27 Racing Wheel"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:c24f"
+name = "G29 Driving Force"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:c262"
+name = "G920 Driving Force"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:c215"
+name = "Extreme 3D Pro"
+maker = "Logitech"
+kind = "joystick"
+
+[[device]]
+id = "044f:b66e"
+name = "T300RS"
+maker = "Thrustmaster"
+kind = "wheel"
+
+[[device]]
+id = "044f:b677"
+name = "T150"
+maker = "Thrustmaster"
+kind = "wheel"
+
+[[device]]
+id = "044f:b67f"
+name = "TMX"
+maker = "Thrustmaster"
+kind = "wheel"
+
+[[device]]
+id = "044f:b108"
+name = "T.Flight HOTAS X"
+maker = "Thrustmaster"
+kind = "joystick"
+
+[[device]]
+id = "044f:b10a"
+name = "T.16000M"
+maker = "Thrustmaster"
+kind = "joystick"
+
+[[device]]
+id = "06a3:075c"
+name = "X52 Flight Control System"
+maker = "Saitek"
+kind = "joystick"
+
+[[device]]
+id = "06a3:0762"
+name = "X52 Pro Flight Control System"
+maker = "Saitek"
+kind = "joystick"
+
+[[device]]
+id = "054c:05c4"
+name = "DualShock 4"
+maker = "Sony"
+kind = "gamepad"
+
+[[device]]
+id = "054c:09cc"
+name = "DualShock 4"
+maker = "Sony"
+kind = "gamepad"
+
+[[device]]
+id = "054c:0ce6"
+name = "DualSense"
+maker = "Sony"
+kind = "gamepad"
+
+[[device]]
+id = "054c:0df2"
+name = "DualSense Edge"
+maker = "Sony"
+kind = "gamepad"
+
+[[device]]
+id = "045e:028e"
+name = "Xbox 360 Controller"
+maker = "Microsoft"
+kind = "gamepad"
+
+[[device]]
+id = "045e:02d1"
+name = "Xbox One Controller"
+maker = "Microsoft"
+kind = "gamepad"
+
+[[device]]
+id = "045e:02dd"
+name = "Xbox One Controller"
+maker = "Microsoft"
+kind = "gamepad"
+
+[[device]]
+id = "045e:02ea"
+name = "Xbox One S Controller"
+maker = "Microsoft"
+kind = "gamepad"
+
+[[device]]
+id = "045e:0b12"
+name = "Xbox Series X|S Controller"
+maker = "Microsoft"
+kind = "gamepad"
+
+[[device]]
+id = "057e:2009"
+name = "Switch Pro Controller"
+maker = "Nintendo"
+kind = "gamepad"
+
+[[device]]
+id = "28de:1102"
+name = "Steam Controller"
+maker = "Valve"
+kind = "gamepad"
+
+[[device]]
+id = "28de:1205"
+name = "Steam Deck Controller"
+maker = "Valve"
+kind = "gamepad"

@@ -1,0 +1,5 @@
+/target
+/dist
+/plugin/node_modules
+/plugin/dist
+/plugin/*.tgz

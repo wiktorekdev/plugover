@@ -1,0 +1,11 @@
+[Unit]
+Description=Plugover host daemon: plugs relay devices in while you stream
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/plugover host
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

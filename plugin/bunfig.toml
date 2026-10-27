@@ -1,0 +1,3 @@
+[install.scopes]
+"@punktfunk" = "https://git.unom.io/api/packages/unom/npm/"
+"@unom" = "https://git.unom.io/api/packages/unom/npm/"

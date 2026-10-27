@@ -1,0 +1,7 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "@fontsource-variable/geist";
+@import "@punktfunk/plugin-kit/theme.css";
+@custom-variant dark (&:is(.dark *));
+@source "../../node_modules/@unom/ui/dist/**/*.{js,mjs}";
+
