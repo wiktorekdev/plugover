@@ -1,7 +1,7 @@
 #!/bin/bash
-# Builds everything:
+# Builds the release files:
 #   dist/plugover-<version>-linux-x86_64.tar.gz   relay + Linux host (install.sh)
-#   dist/windows/                                 Windows host, served on the LAN for install.ps1
+#   dist/windows/                                 Windows host and relay installers + their files
 # PLUGOVER_BASE is the URL the Windows files are downloaded from (default: the latest GitHub release).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -24,7 +24,7 @@ plugin=plugin/punktfunk-plugin-plugover-$plugin_version.tgz
 
 out=dist/plugover-$version-linux-x86_64
 rm -rf "$out" && mkdir -p "$out"
-cp target/x86_64-unknown-linux-musl/release/plugover "$plugin" packaging/install.sh packaging/plugover-* "$out/"
+cp target/x86_64-unknown-linux-musl/release/plugover "$plugin" packaging/linux/* "$out/"
 tar -C dist -czf "$out.tar.gz" "$(basename "$out")"
 
 mkdir -p dist/cache
@@ -35,12 +35,8 @@ win=dist/windows
 rm -rf "$win" && mkdir -p "$win"
 cp target/x86_64-pc-windows-gnu/release/plugover.exe "$plugin" "dist/cache/$usbip_file" "$win/"
 sha() { sha256sum "$1" | cut -d' ' -f1; }
-for role in host relay; do
-    script=install.ps1
-    [ "$role" = relay ] && script=install-relay.ps1
+for script in install.ps1 install-relay.ps1; do
     sed -e "s#__BASE__#$base#g" \
-        -e "s#__ROLE__#$role#g" \
-        -e "s#__SCRIPT__#$script#g" \
         -e "s#__PLUGIN_VERSION__#$plugin_version#g" \
         -e "s#__USBIP_VERSION__#$usbip_version#g" \
         -e "s#__USBIPD_VERSION__#$usbipd_version#g" \
@@ -48,7 +44,7 @@ for role in host relay; do
         -e "s#__SHA_PLUGIN__#$(sha "$win/$(basename "$plugin")")#" \
         -e "s#__SHA_USBIP__#$usbip_sha#" \
         -e "s#__SHA_USBIPD__#$usbipd_sha#" \
-        packaging/install.ps1 > "$win/$script"
+        "packaging/windows/$script" > "$win/$script"
     ! grep -n '__[A-Z_]*__' "$win/$script"
 done
 echo "$out.tar.gz"

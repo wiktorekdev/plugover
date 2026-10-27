@@ -1,15 +1,14 @@
 #!/bin/bash
 # Installs Plugover from a release bundle (or a source checkout after scripts/release.sh).
-#   sudo ./install.sh relay [--lan CIDR] [old-relay.toml]
+#   sudo ./install.sh relay [--lan CIDR]
 #        where the devices are plugged in. --lan opens TCP 7275 and mDNS for that network in an
-#        nftables "inet filter input" chain, now and in /etc/nftables.conf. The optional file
-#        keeps pairings from a test run.
+#        nftables "inet filter input" chain, now and in /etc/nftables.conf.
 #   ./install.sh host                          on the punktfunk host, as your user
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 bin=$here/plugover
-[ -x "$bin" ] || bin=$here/../target/x86_64-unknown-linux-musl/release/plugover
-plugin=$(ls "$here"/punktfunk-plugin-plugover-*.tgz "$here"/../plugin/punktfunk-plugin-plugover-*.tgz 2>/dev/null | head -1 || true)
+[ -x "$bin" ] || bin=$here/../../target/x86_64-unknown-linux-musl/release/plugover
+plugin=$(ls "$here"/punktfunk-plugin-plugover-*.tgz "$here"/../../plugin/punktfunk-plugin-plugover-*.tgz 2>/dev/null | head -1 || true)
 
 open_firewall() {
     local lan=$1 conf=/etc/nftables.conf
@@ -43,16 +42,11 @@ relay)
     shift
     lan=""
     if [ "${1:-}" = "--lan" ]; then lan=$2; shift 2; fi
-    old_state=${1:-}
     # A test relay started by hand would hold the port.
     pkill -x plugover 2>/dev/null && sleep 2 || true
     install -Dm755 "$bin" /usr/local/bin/plugover
     install -Dm644 "$here/plugover-relay.conf" /etc/modules-load.d/plugover-relay.conf
     install -Dm644 "$here/plugover-relay.service" /etc/systemd/system/plugover-relay.service
-    if [ -n "$old_state" ] && [ ! -e /var/lib/plugover/relay.toml ]; then
-        install -Dm600 "$old_state" /var/lib/plugover/relay.toml
-        echo "Kept the pairings from $old_state."
-    fi
     modprobe usbip-host
     systemctl daemon-reload
     systemctl enable plugover-relay
@@ -81,5 +75,5 @@ host)
     fi
     ;;
 *)
-    echo "usage: $0 relay [--lan CIDR] [old-relay.toml] | host"; exit 1 ;;
+    echo "usage: $0 relay [--lan CIDR] | host"; exit 1 ;;
 esac

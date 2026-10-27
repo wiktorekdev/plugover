@@ -1,107 +1,128 @@
 # Plugover
 
-I stream games with [punktfunk](https://git.unom.io/unom/punktfunk), and my wheel and pedals are
-plugged into a different machine than the one running the games. Plugover moves them over the
-network for as long as a stream runs, then gives them back.
+Plugover lets a [punktfunk](https://git.unom.io/unom/punktfunk) host use USB devices that are
+plugged into a different machine: racing wheels, pedals, shifters, HOTAS, gamepads. Devices are
+connected over the network when a stream starts and handed back when it ends.
 
-It uses USB/IP, so the host gets the actual USB device instead of an emulated gamepad. Force
-feedback works, and so does anything else the device does over USB.
+It is built on USB/IP, so the host gets the real USB device rather than an emulated gamepad.
+Force feedback and vendor features keep working.
 
 ![USB devices page in the punktfunk console](docs/img/console.png)
 
-> **Status:** the Linux relay and host are tested (with a Logitech G29). The **Windows relay is
-> untested**. Most of this project was written with Claude Opus 5.5.
+**Typical setup:** you stream to a client that can't take a wheel, like a TV, and the wheel is
+plugged into a small server or PC next to it. That machine becomes the relay, and the games see
+the wheel as if it were plugged into the gaming PC.
 
-## How it fits together
+> **Status:** tested with a Linux relay and a Linux host (Logitech G29). The **Windows relay is
+> untested**. Most of the code was written with Claude Opus 5.5.
 
-There are two machines:
+## Features
 
-- the **relay** is the machine the devices are plugged into (Linux or Windows)
-- the **host** is the punktfunk host (Linux or Windows)
+- **Automatic.** Devices marked for auto-connect are plugged in when a stream starts, reconnected
+  if the link drops and returned when the stream ends.
+- **Real USB.** Force feedback and anything else the device does over USB work as they would
+  locally.
+- **Console plugin.** A **USB devices** page in the punktfunk console for pairing and picking
+  devices.
+- **Safe defaults.** Pairing with a one-time code. Hubs and USB storage are never shared.
+- **Linux and Windows** on both sides.
 
-You pick which devices should auto-connect. When a stream starts they get plugged into the host,
-if the connection drops they come back, and when the stream ends they go back to the relay.
-Hubs and USB storage are never shared, so you can't accidentally hand over a disk.
+## How it works
+
+| Role | Machine | Runs |
+|---|---|---|
+| **Relay** | where the devices are plugged in | `plugover relay` (Linux kernel `usbip-host`, or usbipd-win on Windows) |
+| **Host** | the punktfunk host | `plugover host` daemon + punktfunk plugin (Linux `vhci-hcd`, or usbip-win2 on Windows) |
+
+The relay listens on TCP 7275 and announces itself over mDNS (UDP 5353).
 
 ## Install
 
-Grab the files from the [latest release](https://github.com/wiktorekdev/plugover/releases/latest).
+Files are on the [latest release](https://github.com/wiktorekdev/plugover/releases/latest).
+Install the relay first: it prints a pairing code at the end.
 
-On a Linux relay, unpack the tarball and run the installer as root. `--lan` opens the port and mDNS
-for your network if you use plain nftables. With anything else, open TCP 7275 and UDP 5353 yourself.
+### Relay
+
+**Linux**: unpack `plugover-<version>-linux-x86_64.tar.gz` and run as root. `--lan` opens the
+ports for your network in nftables. With another firewall, open TCP 7275 and UDP 5353 yourself.
 
 ```sh
 sudo ./install.sh relay --lan 192.168.1.0/24
 ```
 
-At the end it prints a pairing code. Keep it for a minute.
-
-On a Windows relay, in PowerShell. This installs [usbipd-win](https://github.com/dorssel/usbipd-win),
-which does the actual USB sharing, and blocks its port (TCP 3240) from the network so the only way
-in is through Plugover's pairing:
+**Windows** (PowerShell): installs [usbipd-win](https://github.com/dorssel/usbipd-win) and blocks
+its own port (TCP 3240) from the network, so pairing is the only way in.
 
 ```powershell
 irm https://github.com/wiktorekdev/plugover/releases/latest/download/install-relay.ps1 | iex
 ```
 
-It prints a pairing code at the end too.
+### Host
 
-On a Linux host, unpack the same tarball and run it as your normal user:
+**Linux**: from the same tarball, as your normal user.
 
 ```sh
 ./install.sh host
 ```
 
-On a Windows host, in PowerShell:
+**Windows** (PowerShell): installs the usbip-win2 driver, the daemon and the console plugin.
 
 ```powershell
 irm https://github.com/wiktorekdev/plugover/releases/latest/download/install.ps1 | iex
 ```
 
-Then open the punktfunk console, go to **USB devices**, pick the relay and type in the code.
-Flip **Auto-connect** on for the wheel, pedals or whatever else you want.
+### Pair
+
+Open the punktfunk console, go to **USB devices**, pick the relay and enter the code. Then turn on
+**Auto-connect** for the devices you want.
 
 ![Pairing code form](docs/img/pairing.png)
 
-## Pairing
-
-The relay usually has no screen, so pairing works with a six-digit code it prints. You get one at
-the end of the install, and `sudo plugover code` (or `plugover code` in an administrator
-PowerShell on Windows) gives you a fresh one later. Each code pairs one
-host and stops working after 15 minutes.
-
-The code never goes over the network: both sides use it for a SPAKE2 key exchange, so sniffing
-the traffic doesn't help, and after five wrong guesses the relay stops accepting attempts.
-
-One thing to know: once a device is connected, its traffic is regular unencrypted USB/IP.
-That's fine at home, but don't run this across a network you don't trust.
+Running an installer again updates Plugover and keeps existing pairings.
 
 ## Command line
 
 Everything in the console also works from a terminal:
 
 ```sh
+plugover status                # paired relays and their devices
 plugover pair --code 482913    # pair with the relay on your network
-plugover status                # what's paired and what's plugged in
 plugover auto 046d:c24f on     # auto-connect a device (vendor:product)
-plugover attach 1-2            # connect a device right now
-sudo plugover code             # on the relay: new pairing code
+plugover attach 1-2            # connect a device now
+sudo plugover code             # on the relay: a new pairing code
 ```
 
-## Building
+## Security
 
-You need Rust with the `x86_64-unknown-linux-musl` and `x86_64-pc-windows-gnu` targets,
-`cargo-zigbuild` and bun. Then:
+- A pairing code works once, for 15 minutes. It never crosses the network: both sides use it for a
+  SPAKE2 key exchange, and the relay stops accepting attempts after five wrong guesses.
+- Once a device is connected, its traffic is plain USB/IP and **not encrypted**. Use Plugover on a
+  network you trust.
+
+Report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
+
+## Building from source
+
+Needs Rust with the `x86_64-unknown-linux-musl` and `x86_64-pc-windows-gnu` targets,
+`cargo-zigbuild` and bun.
 
 ```sh
-scripts/release.sh
+scripts/build.sh                                  # release files in dist/
+scripts/deploy.sh <relay-ssh-host> <lan-cidr>     # build, install the relay over ssh and the host here
 ```
+
+| Path | What |
+|---|---|
+| `src/` | the `plugover` binary (relay, host daemon, CLI) |
+| `plugin/` | punktfunk console plugin |
+| `packaging/linux/` | `install.sh` and systemd units |
+| `packaging/windows/` | host (`install.ps1`) and relay (`install-relay.ps1`) installers |
+| `data/catalog.toml` | friendly names for devices whose USB ids are unhelpful |
 
 ## Contributing
 
-Bug reports and PRs are welcome. Use the issue templates and say which setup you ran it on.
-Questions go in [Discussions](https://github.com/wiktorekdev/plugover/discussions). Security
-issues: see [SECURITY.md](SECURITY.md).
+Bug reports and pull requests are welcome. Please say which relay and host setup you used.
+Questions and setup stories go in [Discussions](https://github.com/wiktorekdev/plugover/discussions).
 
 ## License
 
