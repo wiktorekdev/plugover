@@ -9,6 +9,9 @@ feedback works, and so does anything else the device does over USB.
 
 ![USB devices page in the punktfunk console](docs/img/console.png)
 
+> **Status:** the Linux relay and host are tested (with a Logitech G29). The **Windows relay is
+> untested**. Most of this project was written with Claude Opus 5.5.
+
 ## How it fits together
 
 There are two machines:
@@ -93,6 +96,12 @@ You need Rust with the `x86_64-unknown-linux-musl` and `x86_64-pc-windows-gnu` t
 ```sh
 scripts/release.sh
 ```
+
+## Contributing
+
+Bug reports and PRs are welcome. Use the issue templates and say which setup you ran it on.
+Questions go in [Discussions](https://github.com/wiktorekdev/plugover/discussions). Security
+issues: see [SECURITY.md](SECURITY.md).
 
 ## License
 

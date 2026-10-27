@@ -1,0 +1,35 @@
+name: Bug report
+description: Something doesn't work
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Plugover version
+      description: Output of `plugover --version` on the host and on the relay
+      placeholder: 0.4.0 / 0.4.0
+    validations:
+      required: true
+  - type: dropdown
+    id: setup
+    attributes:
+      label: Setup
+      options:
+        - Linux relay + Linux host
+        - Linux relay + Windows host
+        - Windows relay + Linux host
+        - Windows relay + Windows host
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: USB device
+      placeholder: 046d:c24f Logitech G29
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected and what you got. Include `plugover status` and relevant logs (`journalctl -u plugover-relay`, `journalctl --user -u plugover-host`).
+    validations:
+      required: true
