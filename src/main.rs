@@ -1,4 +1,4 @@
-// Relay-side code only runs on Linux; on Windows it is compiled for the shared types and left unused.
+// Linux-only code is compiled on Windows for the shared types and left unused.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 mod auth;
@@ -8,11 +8,11 @@ mod host;
 mod hostd;
 mod net;
 mod proto;
-#[cfg(target_os = "linux")]
 mod relay;
 mod state;
 mod sysfs;
 mod usbip;
+mod usbipd;
 mod vhci;
 
 use anyhow::Result;
@@ -26,7 +26,6 @@ use std::{
 };
 
 const SYS: &str = "/sys";
-const RELAY_STATE: &str = "/var/lib/plugover/relay.toml";
 
 #[derive(Parser)]
 #[command(version, about = "Hands USB devices plugged into one machine to a punktfunk host")]
@@ -45,16 +44,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lend devices to paired hosts (run where the devices are plugged in, as root).
+    /// Lend devices to paired hosts (run where the devices are plugged in, as root or administrator).
     Relay {
         #[arg(long, default_value_t = proto::DEFAULT_PORT)]
         port: u16,
-        #[arg(long, default_value = RELAY_STATE)]
+        #[arg(long, default_value_os_t = relay_state())]
         state: PathBuf,
     },
-    /// Print a code that pairs one host with this relay (run on the relay, as root).
+    /// Print a code that pairs one host with this relay (run on the relay, as root or administrator).
     Code {
-        #[arg(long, default_value = RELAY_STATE)]
+        #[arg(long, default_value_os_t = relay_state())]
         state: PathBuf,
     },
     /// Run the host daemon (on the punktfunk host).
@@ -124,6 +123,16 @@ fn config_dir() -> PathBuf {
 #[cfg(not(windows))]
 fn config_dir() -> PathBuf {
     env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config")).join("plugover")
+}
+
+#[cfg(windows)]
+fn relay_state() -> PathBuf {
+    program_data().join("relay.toml")
+}
+
+#[cfg(not(windows))]
+fn relay_state() -> PathBuf {
+    "/var/lib/plugover/relay.toml".into()
 }
 
 /// Its own folder: the installer lets the punktfunk plugin (LOCAL SERVICE) read this one, not the
@@ -203,9 +212,7 @@ fn main() -> Result<()> {
     let show = |v: Value| println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
     match cli.cmd {
         Cmd::Devices { json } => devices(json)?,
-        #[cfg(target_os = "linux")]
         Cmd::Relay { port, state } => std::sync::Arc::new(relay::Relay::open(sys, state)?).serve(port)?,
-        #[cfg(target_os = "linux")]
         Cmd::Code { state } => {
             let code = relay::open_pairing(&state)?;
             println!("Pairing code for {}: {} {}", state::hostname(), &code[..3], &code[3..]);
@@ -214,8 +221,6 @@ fn main() -> Result<()> {
                 relay::PAIR_MINUTES
             );
         }
-        #[cfg(not(target_os = "linux"))]
-        Cmd::Relay { .. } | Cmd::Code { .. } => anyhow::bail!("the relay runs on Linux only; this machine can be a host"),
         Cmd::Host { config } => hostd::Daemon::open(sys, config)?.run(&cli.socket)?,
         Cmd::Status { json } => {
             let v = call(Request::Status)?;

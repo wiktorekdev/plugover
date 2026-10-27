@@ -1,6 +1,6 @@
 [package]
 name = "plugover"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Hands USB devices plugged into one machine to a punktfunk host over the network"
 license = "MIT"

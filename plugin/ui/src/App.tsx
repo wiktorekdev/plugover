@@ -179,8 +179,8 @@ function CodeEntry({
 		<Card className="flex flex-col items-center gap-5 py-12 text-center">
 			<h1 className="max-w-md text-2xl font-semibold tracking-tight">Pairing code for {name}</h1>
 			<p className="max-w-md text-muted-foreground">
-				Shown at the end of the relay install. For a new one, run <code className="whitespace-nowrap rounded bg-muted px-1.5 py-0.5">sudo plugover code</code> on{" "}
-				{name}.
+				Shown at the end of the relay install. For a new one, run <code className="whitespace-nowrap rounded bg-muted px-1.5 py-0.5">plugover code</code> on{" "}
+				{name} as root or administrator.
 			</p>
 			<form onSubmit={submit} className="flex flex-wrap items-end justify-center gap-2">
 				<InputText

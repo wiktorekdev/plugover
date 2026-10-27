@@ -11,6 +11,9 @@ plugin_version=$(grep -m1 '"version"' plugin/package.json | cut -d'"' -f4)
 usbip_version=0.9.8.0
 usbip_sha=81f426741f7ee2ed991febe24a22daca8400b6ae2f171054e3fb404897e15d39
 usbip_file=USBip-$usbip_version-x64.exe
+# The Windows relay installer downloads usbipd-win from its own release page.
+usbipd_version=5.3.0
+usbipd_sha=1c984914aec944de19b64eff232421439629699f8138e3ddc29301175bc6d938
 
 # Build paths would otherwise end up in panic messages.
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=~"
@@ -32,13 +35,21 @@ win=dist/windows
 rm -rf "$win" && mkdir -p "$win"
 cp target/x86_64-pc-windows-gnu/release/plugover.exe "$plugin" "dist/cache/$usbip_file" "$win/"
 sha() { sha256sum "$1" | cut -d' ' -f1; }
-sed -e "s#__BASE__#$base#g" \
-    -e "s#__PLUGIN_VERSION__#$plugin_version#g" \
-    -e "s#__USBIP_VERSION__#$usbip_version#g" \
-    -e "s#__SHA_EXE__#$(sha "$win/plugover.exe")#" \
-    -e "s#__SHA_PLUGIN__#$(sha "$win/$(basename "$plugin")")#" \
-    -e "s#__SHA_USBIP__#$usbip_sha#" \
-    packaging/install.ps1 > "$win/install.ps1"
-! grep -n '__[A-Z_]*__' "$win/install.ps1"
+for role in host relay; do
+    script=install.ps1
+    [ "$role" = relay ] && script=install-relay.ps1
+    sed -e "s#__BASE__#$base#g" \
+        -e "s#__ROLE__#$role#g" \
+        -e "s#__SCRIPT__#$script#g" \
+        -e "s#__PLUGIN_VERSION__#$plugin_version#g" \
+        -e "s#__USBIP_VERSION__#$usbip_version#g" \
+        -e "s#__USBIPD_VERSION__#$usbipd_version#g" \
+        -e "s#__SHA_EXE__#$(sha "$win/plugover.exe")#" \
+        -e "s#__SHA_PLUGIN__#$(sha "$win/$(basename "$plugin")")#" \
+        -e "s#__SHA_USBIP__#$usbip_sha#" \
+        -e "s#__SHA_USBIPD__#$usbipd_sha#" \
+        packaging/install.ps1 > "$win/$script"
+    ! grep -n '__[A-Z_]*__' "$win/$script"
+done
 echo "$out.tar.gz"
-echo "$win/ (Windows: irm $base/install.ps1 | iex)"
+echo "$win/ (Windows host: irm $base/install.ps1 | iex, relay: irm $base/install-relay.ps1 | iex)"

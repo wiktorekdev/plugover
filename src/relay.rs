@@ -1,5 +1,6 @@
 //! The relay: the machine the wheel is plugged into. It lends devices to paired hosts, tells
-//! them what is plugged in, and takes devices back when a host lets go or disappears.
+//! them what is plugged in, and takes devices back when a host lets go or disappears. On Linux
+//! the kernel's usbip-host serves the devices, on Windows usbipd-win.
 
 use crate::{
     auth,
@@ -7,14 +8,16 @@ use crate::{
     discovery, net,
     proto::{self, DeviceInfo, PairConfirm, PairHello, PairReply, Snapshot},
     state::{self, PairedHost, PairingWindow, RelayState},
-    sysfs, usbip,
+    usbip,
+    usbipd::Device,
 };
+#[cfg(not(windows))]
+use crate::sysfs;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::{
     collections::HashMap,
     io::{BufReader, Read, Write},
     net::{TcpListener, TcpStream},
-    os::fd::AsRawFd,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -24,6 +27,10 @@ use std::{
 
 pub const PAIR_MINUTES: u64 = 15;
 const PAIR_ATTEMPTS: u8 = 5;
+#[cfg(windows)]
+const CODE_HINT: &str = "run `plugover code` as administrator";
+#[cfg(not(windows))]
+const CODE_HINT: &str = "run `sudo plugover code`";
 const HEARTBEAT: Duration = Duration::from_secs(5);
 
 pub struct Relay {
@@ -69,18 +76,21 @@ impl Relay {
     }
 
     fn accept(self: Arc<Self>, listener: TcpListener) -> Result<()> {
-        // Nothing is lent yet, so anything usbip-host still claims is left over from a crash.
-        for busid in sysfs::export_claimed(&self.sys) {
-            match sysfs::export_release(&self.sys, &busid) {
-                Ok(()) => eprintln!("gave {busid} back to its local driver (left over from an earlier run)"),
-                Err(e) => eprintln!("could not give {busid} back: {e}"),
+        #[cfg(target_os = "linux")]
+        {
+            // Nothing is lent yet, so anything usbip-host still claims is left over from a crash.
+            for busid in sysfs::export_claimed(&self.sys) {
+                match sysfs::export_release(&self.sys, &busid) {
+                    Ok(()) => eprintln!("gave {busid} back to its local driver (left over from an earlier run)"),
+                    Err(e) => eprintln!("could not give {busid} back: {e}"),
+                }
             }
+            let me = self.clone();
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_secs(1));
+                me.reclaim();
+            });
         }
-        let me = self.clone();
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(1));
-            me.reclaim();
-        });
         for conn in listener.incoming() {
             let Ok(stream) = conn else { continue };
             let me = self.clone();
@@ -135,25 +145,44 @@ impl Relay {
                 return Err(e);
             }
         };
-        sysfs::export_bind(&self.sys, &busid)?;
-        net::tune(&s)?;
-        // Same order as usbipd: the kernel takes the socket, then the reply goes out.
-        sysfs::export_socket(&self.sys, &busid, s.as_raw_fd())?;
-        self.lent.lock().unwrap().insert(busid.clone(), host.name.clone());
-        usbip::write_import_reply(&mut s, Some(&net::exported(&dev)))?;
-        eprintln!("lent {busid} to {}", host.name);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            sysfs::export_bind(&self.sys, &busid)?;
+            net::tune(&s)?;
+            // Same order as usbipd: the kernel takes the socket, then the reply goes out.
+            sysfs::export_socket(&self.sys, &busid, s.as_raw_fd())?;
+            self.lent.lock().unwrap().insert(busid.clone(), host.name.clone());
+            usbip::write_import_reply(&mut s, Some(&net::exported(&dev.dev)))?;
+            eprintln!("lent {busid} to {}", host.name);
+            // reclaim() takes it back.
+        }
+        #[cfg(windows)]
+        {
+            self.lent.lock().unwrap().insert(busid.clone(), host.name.clone());
+            eprintln!("lent {busid} to {}", host.name);
+            let result = crate::usbipd::lend(s, &dev);
+            self.lent.lock().unwrap().remove(&busid);
+            eprintln!("{busid} is back from {}", host.name);
+            result?;
+        }
         Ok(())
     }
 
-    fn lendable(&self, busid: &str) -> Result<sysfs::UsbDevice> {
-        let dev = sysfs::list(&self.sys)?
-            .into_iter()
-            .find(|d| d.busid == busid)
-            .with_context(|| format!("no device at {busid}"))?;
-        if let Some(why) = catalog::blocked_reason(&dev) {
+    /// Devices plugged in here right now.
+    fn devices(&self) -> Result<Vec<Device>> {
+        #[cfg(windows)]
+        return crate::usbipd::list();
+        #[cfg(not(windows))]
+        Ok(sysfs::list(&self.sys)?.into_iter().map(|dev| Device { dev, attached: false, bound: false }).collect())
+    }
+
+    fn lendable(&self, busid: &str) -> Result<Device> {
+        let dev = self.devices()?.into_iter().find(|d| d.dev.busid == busid).with_context(|| format!("no device at {busid}"))?;
+        if let Some(why) = catalog::blocked_reason(&dev.dev) {
             bail!("{busid} is a {why}, which is never shared");
         }
-        ensure!(!self.lent.lock().unwrap().contains_key(busid), "{busid} is already in use");
+        ensure!(!dev.attached && !self.lent.lock().unwrap().contains_key(busid), "{busid} is already in use");
         Ok(dev)
     }
 
@@ -175,7 +204,8 @@ impl Relay {
                 proto::send(&mut s, &snap)?;
                 (last, sent_at) = (Some(snap), Instant::now());
             }
-            // ponytail: polls sysfs every 500 ms; a uevent socket would report plugs instantly.
+            // ponytail: polls every 500 ms (sysfs, or a `usbipd state` run on Windows); a uevent
+            // socket or device notifications would report plugs instantly.
             thread::sleep(Duration::from_millis(500));
         }
     }
@@ -183,9 +213,10 @@ impl Relay {
     fn snapshot(&self) -> Result<Snapshot> {
         let lent = self.lent.lock().unwrap().clone();
         let mut known = self.known.lock().unwrap();
-        let devices = sysfs::list(&self.sys)?
+        let devices = self
+            .devices()?
             .iter()
-            .map(|d| {
+            .map(|Device { dev: d, attached, .. }| {
                 let key = (d.busid.clone(), d.vid, d.pid);
                 let fresh = catalog::identify(d, self.ids.as_ref());
                 let identity = if d.driver.as_deref() == Some("usbip-host") {
@@ -198,7 +229,8 @@ impl Relay {
                     busid: d.busid.clone(),
                     id: format!("{:04x}:{:04x}", d.vid, d.pid),
                     identity,
-                    lent_to: lent.get(&d.busid).cloned(),
+                    // Attached but not by us: WSL or another USB/IP client on Windows.
+                    lent_to: lent.get(&d.busid).cloned().or_else(|| attached.then(|| "another USB/IP client".into())),
                 }
             })
             .collect();
@@ -222,7 +254,7 @@ impl Relay {
         let mut window: PairingWindow = state::load(&window_path)?;
         if !window.is_open() {
             let _ = fs::remove_file(&window_path);
-            return Err(refuse(&mut w, format!("pairing is closed; run `sudo plugover code` on {} for a code", self.name)));
+            return Err(refuse(&mut w, format!("pairing is closed; {CODE_HINT} on {} for a code", self.name)));
         }
         let host_id: auth::HostId =
             hex::decode(&hello.host_id).ok().and_then(|b| b.try_into().ok()).context("pairing request has a malformed id")?;
@@ -237,7 +269,7 @@ impl Relay {
             window.attempts -= 1;
             if window.attempts == 0 {
                 let _ = fs::remove_file(&window_path);
-                return Err(refuse(&mut w, "wrong code; too many tries, so pairing is closed until you run `sudo plugover code` again".into()));
+                return Err(refuse(&mut w, format!("wrong code; too many tries, so pairing is closed until you {CODE_HINT} again")));
             }
             state::save(&window_path, &window)?;
             return Err(refuse(&mut w, format!("wrong code from {} ({} tries left)", hello.name, window.attempts)));
@@ -257,6 +289,7 @@ impl Relay {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     // ponytail: polls usbip_status every second; a uevent watch would react instantly.
     fn reclaim(&self) {
         self.lent.lock().unwrap().retain(|busid, host| match sysfs::export_status(&self.sys, busid) {

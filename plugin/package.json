@@ -1,6 +1,6 @@
 {
 	"name": "punktfunk-plugin-plugover",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"description": "punktfunk plugin for Plugover: connects USB devices from a relay while a stream runs.",
 	"license": "MIT",
 	"type": "module",

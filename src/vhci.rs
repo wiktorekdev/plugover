@@ -120,10 +120,10 @@ mod imp {
         let (relay2, busid2, alive2) = (relay.clone(), busid.to_string(), alive.clone());
         thread::spawn(move || {
             // `--once` means the driver connects a single time; the listener goes with this thread.
-            if let Ok((driver, _)) = listener.accept() {
-                if let Err(e) = proxy(driver, &relay2, &busid2) {
-                    eprintln!("{busid2} from {}: {e:#}", relay2.name);
-                }
+            if let Ok((driver, _)) = listener.accept()
+                && let Err(e) = proxy(driver, &relay2, &busid2)
+            {
+                eprintln!("{busid2} from {}: {e:#}", relay2.name);
             }
             alive2.store(false, Ordering::SeqCst);
         });

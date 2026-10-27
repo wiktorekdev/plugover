@@ -63,7 +63,7 @@ export default definePlugin({
 			id: "plugover",
 			title: "USB devices",
 			icon: "cable",
-			version: "0.3.0",
+			version: "0.4.0",
 			staticDir: new URL("./ui", import.meta.url),
 			fetch: handle,
 		});

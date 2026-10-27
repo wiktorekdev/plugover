@@ -13,7 +13,7 @@ feedback works, and so does anything else the device does over USB.
 
 There are two machines:
 
-- the **relay** is the Linux box the devices are plugged into
+- the **relay** is the machine the devices are plugged into (Linux or Windows)
 - the **host** is the punktfunk host (Linux or Windows)
 
 You pick which devices should auto-connect. When a stream starts they get plugged into the host,
@@ -24,7 +24,7 @@ Hubs and USB storage are never shared, so you can't accidentally hand over a dis
 
 Grab the files from the [latest release](https://github.com/wiktorekdev/plugover/releases/latest).
 
-On the relay, unpack the tarball and run the installer as root. `--lan` opens the port and mDNS
+On a Linux relay, unpack the tarball and run the installer as root. `--lan` opens the port and mDNS
 for your network if you use plain nftables. With anything else, open TCP 7275 and UDP 5353 yourself.
 
 ```sh
@@ -32,6 +32,16 @@ sudo ./install.sh relay --lan 192.168.1.0/24
 ```
 
 At the end it prints a pairing code. Keep it for a minute.
+
+On a Windows relay, in PowerShell. This installs [usbipd-win](https://github.com/dorssel/usbipd-win),
+which does the actual USB sharing, and blocks its port (TCP 3240) from the network so the only way
+in is through Plugover's pairing:
+
+```powershell
+irm https://github.com/wiktorekdev/plugover/releases/latest/download/install-relay.ps1 | iex
+```
+
+It prints a pairing code at the end too.
 
 On a Linux host, unpack the same tarball and run it as your normal user:
 
@@ -53,7 +63,8 @@ Flip **Auto-connect** on for the wheel, pedals or whatever else you want.
 ## Pairing
 
 The relay usually has no screen, so pairing works with a six-digit code it prints. You get one at
-the end of the install, and `sudo plugover code` gives you a fresh one later. Each code pairs one
+the end of the install, and `sudo plugover code` (or `plugover code` in an administrator
+PowerShell on Windows) gives you a fresh one later. Each code pairs one
 host and stops working after 15 minutes.
 
 The code never goes over the network: both sides use it for a SPAKE2 key exchange, so sniffing
