@@ -1,5 +1,5 @@
 #!/bin/bash
-# Installs Plugover from a release bundle (or a source checkout after scripts/release.sh).
+# Installs Plugover from a release bundle (or a source checkout after scripts/build.sh).
 #   sudo ./install.sh relay [--lan CIDR]
 #        where the devices are plugged in. --lan opens TCP 7275 and mDNS for that network in an
 #        nftables "inet filter input" chain, now and in /etc/nftables.conf.
