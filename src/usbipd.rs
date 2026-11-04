@@ -31,6 +31,7 @@ struct Entry {
 }
 
 /// A device plugged into the relay. Linux fills in only `dev`.
+#[derive(Clone)]
 pub struct Device {
     pub dev: UsbDevice,
     /// Some USB/IP client has it right now (us, or something else such as WSL).
@@ -64,7 +65,7 @@ pub fn parse(json: &str) -> Result<Vec<Device>> {
             let d = e.description.to_lowercase();
             let class = if d.contains("usb hub") { 0x09 } else { 0 };
             let storage = d.contains("mass storage") || d.contains("disk drive") || d.contains("uasp");
-            let interfaces = if storage { vec![Interface { class: 0x08, subclass: 0, protocol: 0, hid: None }] } else { Vec::new() };
+            let interfaces = if storage { vec![Interface { class: 0x08, subclass: 0, protocol: 0, hid: None, net: false }] } else { Vec::new() };
             Some(Device {
                 attached: e.client.is_some(),
                 bound: e.persisted_guid.is_some(),
@@ -108,7 +109,7 @@ mod imp {
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    fn exe() -> PathBuf {
+    pub fn exe() -> PathBuf {
         if let Some(p) = env::var_os("PLUGOVER_USBIPD") {
             return p.into();
         }
@@ -166,7 +167,7 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{lend, list};
+pub use imp::{exe, lend, list};
 
 #[cfg(test)]
 mod tests {

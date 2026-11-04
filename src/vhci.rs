@@ -67,7 +67,7 @@ mod imp {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     /// usbip-win2's command-line tool.
-    fn usbip_exe() -> PathBuf {
+    pub fn usbip_exe() -> PathBuf {
         if let Some(p) = env::var_os("PLUGOVER_USBIP") {
             return p.into();
         }
@@ -166,3 +166,5 @@ mod imp {
 }
 
 pub use imp::{alive, attach, detach};
+#[cfg(windows)]
+pub use imp::usbip_exe;

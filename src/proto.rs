@@ -13,6 +13,10 @@ pub const CONTROL: &[u8; 4] = b"PLC1";
 /// Pair a new host with the code the relay printed.
 pub const PAIR: &[u8; 4] = b"PLP2";
 pub const CONTROL_CONTEXT: &str = "control";
+/// Sent instead of a nonce to a host the relay does not know (never paired, or unpaired since).
+/// Older hosts just fail the challenge with it.
+pub const UNPAIRED: &[u8; 32] = b"plugover: this host is unpaired.";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Host side of the challenge: announce who we are, get the relay's nonce.
 pub fn challenge(s: &mut (impl Read + Write), magic: &[u8; 4], host: &auth::HostId) -> io::Result<[u8; 32]> {
@@ -21,6 +25,9 @@ pub fn challenge(s: &mut (impl Read + Write), magic: &[u8; 4], host: &auth::Host
     s.write_all(&hello)?;
     let mut nonce = [0u8; 32];
     s.read_exact(&mut nonce)?;
+    if &nonce == UNPAIRED {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the relay does not know this host anymore; pair again"));
+    }
     Ok(nonce)
 }
 
@@ -64,6 +71,7 @@ pub enum PairReply {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DeviceInfo {
     pub busid: String,
     /// vendor:product, e.g. 046d:c24f.
@@ -80,6 +88,9 @@ pub struct Snapshot {
     pub relay_id: String,
     pub relay: String,
     pub devices: Vec<DeviceInfo>,
+    /// Plugover version on the relay; empty before 0.5.
+    #[serde(default)]
+    pub version: String,
 }
 
 #[cfg(test)]

@@ -1,34 +1,41 @@
 // Linux-only code is compiled on Windows for the shared types and left unused.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+mod api;
 mod auth;
 mod catalog;
+mod cli;
 mod discovery;
+mod doctor;
 mod host;
 mod hostd;
 mod net;
 mod proto;
 mod relay;
+mod setup;
 mod state;
 mod sysfs;
+mod term;
 mod usbip;
 mod usbipd;
 mod vhci;
 
+use anstream::{eprintln, println};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use hostd::Request;
-use serde::Serialize;
-use serde_json::Value;
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
+use std::{env, path::PathBuf, process::ExitCode};
+use cli::{ask, choose_relay, print_code, print_discovered, print_hosts, print_share, print_status};
+use term::{ACCENT, BAD, BOLD, DIM, GOOD, cmd, paint};
 
 const SYS: &str = "/sys";
+#[cfg(windows)]
+const SUDO: &str = "run it again as administrator";
+#[cfg(not(windows))]
+const SUDO: &str = "run it again with sudo";
 
 #[derive(Parser)]
-#[command(version, about = "Hands USB devices plugged into one machine to a punktfunk host")]
+#[command(version, styles = term::CLAP, about = "Hands USB devices plugged into one machine to a punktfunk host")]
 struct Cli {
     /// Where the host daemon listens: its socket on Linux, its token file on Windows.
     #[arg(long, global = true, default_value_os_t = endpoint())]
@@ -39,37 +46,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// List the USB devices on this machine.
-    Devices {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Lend devices to paired hosts (run where the devices are plugged in, as root or administrator).
-    Relay {
-        #[arg(long, default_value_t = proto::DEFAULT_PORT)]
-        port: u16,
-        #[arg(long, default_value_os_t = relay_state())]
-        state: PathBuf,
-    },
-    /// Print a code that pairs one host with this relay (run on the relay, as root or administrator).
-    Code {
-        #[arg(long, default_value_os_t = relay_state())]
-        state: PathBuf,
-    },
-    /// Run the host daemon (on the punktfunk host).
-    Host {
-        #[arg(long, default_value_os_t = config_dir().join("host.toml"))]
-        config: PathBuf,
-    },
-    /// Show paired relays and their devices.
+    /// Install, update or remove Plugover on this computer, as the relay or the host.
+    Setup(setup::Args),
+    /// Show paired relays and their devices (on the host).
     Status {
         #[arg(long)]
         json: bool,
     },
     /// Find relays on the network.
     Discover,
-    /// Pair with a relay using the code from `plugover code` on it. Without an address, pairs
-    /// with the only relay found on the network; without --code, asks for it.
+    /// Pair with a relay using the code from `plugover code` on it. Without an address, finds
+    /// the relay on the network; without --code, asks for it.
     Pair {
         address: Option<String>,
         #[arg(long)]
@@ -77,18 +64,31 @@ enum Cmd {
     },
     /// Forget a paired relay.
     Forget { relay: String },
-    /// Pass a device (vendor:product) through whenever a stream runs.
+    /// Plug a device (vendor:product, see `plugover status`) in whenever a stream runs.
     Auto {
         device: String,
         #[arg(value_parser = ["on", "off"])]
         state: String,
         #[arg(long)]
         relay: Option<String>,
+        /// Only the one on this port (busid, see `plugover status`), when several of the same
+        /// model are plugged in.
+        #[arg(long)]
+        port: Option<String>,
     },
-    /// Tell the daemon a stream started or stopped (the punktfunk plugin does this for you).
-    Session {
-        #[arg(value_parser = ["start", "stop"])]
-        state: String,
+    /// Name a device model or correct its kind, when Plugover gets it wrong.
+    Label {
+        /// vendor:product, see `plugover status`.
+        device: String,
+        /// What the console and `plugover status` call it.
+        #[arg(long)]
+        name: Option<String>,
+        /// What kind of device it is (sets its icon).
+        #[arg(long, value_enum)]
+        kind: Option<catalog::Kind>,
+        /// Go back to what Plugover detects.
+        #[arg(long, conflicts_with_all = ["name", "kind"])]
+        reset: bool,
     },
     /// Plug a device from the relay in now.
     Attach {
@@ -101,6 +101,92 @@ enum Cmd {
         busid: String,
         #[arg(long)]
         relay: Option<String>,
+    },
+    /// Check this machine's setup and say what to fix.
+    Doctor {
+        /// Print a plain-text report with the checks and recent logs, for a bug report.
+        #[arg(long)]
+        report: bool,
+        #[arg(long, default_value_os_t = relay_state())]
+        state: PathBuf,
+    },
+    /// Show the relay's or the host daemon's log.
+    Logs {
+        /// The relay's log.
+        #[arg(long, conflicts_with = "host")]
+        relay: bool,
+        /// The host daemon's log (the default when both run here).
+        #[arg(long)]
+        host: bool,
+        /// Keep showing new lines.
+        #[arg(long, short)]
+        follow: bool,
+        /// How many lines to show.
+        #[arg(long, short = 'n', default_value_t = 100)]
+        lines: usize,
+    },
+    /// Install the newest Plugover release over this one; pairings and settings stay.
+    Update {
+        /// Only say whether there is a newer release.
+        #[arg(long)]
+        check: bool,
+        /// Do not ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// List the USB devices on this machine.
+    Devices {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a code that pairs one host with this relay (on the relay, as root or administrator).
+    Code {
+        #[arg(long, default_value_os_t = relay_state())]
+        state: PathBuf,
+    },
+    /// List the hosts paired with this relay (on the relay, as root or administrator).
+    Hosts {
+        #[arg(long, default_value_os_t = relay_state())]
+        state: PathBuf,
+    },
+    /// Remove a paired host; it loses its devices within a second (on the relay).
+    Unpair {
+        /// Its name or id, from `plugover hosts`.
+        host: String,
+        #[arg(long, default_value_os_t = relay_state())]
+        state: PathBuf,
+    },
+    /// Show or limit which devices this relay lends out (on the relay). Once a device is on the
+    /// list, only listed devices are shared.
+    Share {
+        /// vendor:product, see `plugover devices`.
+        #[arg(requires = "toggle")]
+        device: Option<String>,
+        #[arg(value_name = "on|off", value_parser = ["on", "off"], requires = "device")]
+        toggle: Option<String>,
+        /// Share every device again (except hubs and storage, which never are).
+        #[arg(long, conflicts_with = "device")]
+        all: bool,
+        #[arg(long, default_value_os_t = relay_state())]
+        state: PathBuf,
+    },
+    /// Lend devices to paired hosts (the relay service runs this).
+    Relay {
+        #[arg(long, default_value_t = proto::DEFAULT_PORT)]
+        port: u16,
+        #[arg(long, default_value_os_t = relay_state())]
+        state: PathBuf,
+    },
+    /// Run the host daemon (the host service runs this).
+    Host {
+        #[arg(long, default_value_os_t = config_dir().join("host.toml"))]
+        config: PathBuf,
+    },
+    /// Tell the daemon a stream started or stopped (the punktfunk plugin does this for you).
+    #[command(hide = true)]
+    Session {
+        #[arg(value_parser = ["start", "stop"])]
+        state: String,
     },
 }
 
@@ -148,116 +234,127 @@ fn endpoint() -> PathBuf {
     env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/state")).join("plugover/host.sock")
 }
 
-#[derive(Serialize)]
-struct DeviceView {
-    busid: String,
-    id: String,
-    driver: Option<String>,
-    #[serde(flatten)]
-    identity: catalog::Identity,
-}
-
-fn devices(json: bool) -> Result<()> {
-    let ids = catalog::UsbIds::load();
-    let views: Vec<DeviceView> = sysfs::list(Path::new(SYS))?
-        .iter()
-        .map(|d| DeviceView {
-            busid: d.busid.clone(),
-            id: format!("{:04x}:{:04x}", d.vid, d.pid),
-            driver: d.driver.clone(),
-            identity: catalog::identify(d, ids.as_ref()),
-        })
-        .collect();
-    if json {
-        println!("{}", serde_json::to_string_pretty(&views)?);
-        return Ok(());
-    }
-    for v in &views {
-        let i = &v.identity;
-        let kind = match &i.blocked {
-            Some(why) => format!("never shared ({why})"),
-            None => i.kind.label().to_string(),
-        };
-        println!("{:<10} {:<10} {:<30} {}", v.busid, v.id, kind, i.title);
-    }
-    Ok(())
-}
-
-fn print_status(v: &Value) {
-    println!("{} · stream {}", v["host"].as_str().unwrap_or("?"), if v["session"] == true { "running" } else { "not running" });
-    let relays = v["relays"].as_array().cloned().unwrap_or_default();
-    if relays.is_empty() {
-        println!("No relay paired yet. Run `plugover pair`.");
-    }
-    for r in relays {
-        let online = if r["online"] == true { "online" } else { "offline" };
-        println!("\n{} ({}) {online}", r["name"].as_str().unwrap_or("?"), r["address"].as_str().unwrap_or("?"));
-        for d in r["devices"].as_array().into_iter().flatten().filter(|d| d["blocked"].is_null()) {
-            let auto = if d["auto"] == true { "auto" } else { "" };
-            println!(
-                "  {:<8} {:<10} {:<34} {:<9} {auto}",
-                d["busid"].as_str().unwrap_or(""),
-                d["id"].as_str().unwrap_or(""),
-                d["title"].as_str().unwrap_or(""),
-                d["state"].as_str().unwrap_or("")
-            );
-        }
-    }
-}
-
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let sys = PathBuf::from(SYS);
+fn run(cli: Cli) -> Result<()> {
     let call = |req: Request| hostd::call(&cli.socket, &req);
-    let show = |v: Value| println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+    let done = |msg: String| println!("{} {msg}", paint(GOOD.bold(), "✓"));
     match cli.cmd {
-        Cmd::Devices { json } => devices(json)?,
-        Cmd::Relay { port, state } => std::sync::Arc::new(relay::Relay::open(sys, state)?).serve(port)?,
-        Cmd::Code { state } => {
-            let code = relay::open_pairing(&state)?;
-            println!("Pairing code for {}: {} {}", state::hostname(), &code[..3], &code[3..]);
-            println!(
-                "Type it in the punktfunk console under USB devices, or run `plugover pair` on the host. It works once, for {} minutes.",
-                relay::PAIR_MINUTES
-            );
+        Cmd::Setup(args) => setup::run(args)?,
+        Cmd::Devices { json } => cli::devices(json, &state::load::<state::HostConfig>(&config_dir().join("host.toml")).unwrap_or_default().label)?,
+        Cmd::Relay { port, state } => std::sync::Arc::new(relay::Relay::open(SYS.into(), state)?).serve(port)?,
+        Cmd::Code { state } => print_code(&relay::open_pairing(&state)?),
+        Cmd::Hosts { state } => print_hosts(&state::load(&state)?),
+        Cmd::Unpair { host, state } => {
+            let h = relay::unpair(&state, &host)?;
+            done(format!("Unpaired {}. Devices it had come back within a second.", paint(BOLD, &h.name)));
         }
-        Cmd::Host { config } => hostd::Daemon::open(sys, config)?.run(&cli.socket)?,
+        Cmd::Share { device, toggle, all, state } => {
+            let st = match (device, all) {
+                (Some(d), _) => relay::share(&state, Some((&d, toggle.as_deref() == Some("on"))))?,
+                (None, true) => relay::share(&state, None)?,
+                (None, false) => state::load(&state)?,
+            };
+            print_share(&st);
+        }
+        Cmd::Host { config } => hostd::Daemon::open(SYS.into(), config)?.run(&cli.socket)?,
+        Cmd::Doctor { report: true, state } => setup::report(&cli.socket, &config_dir().join("host.toml"), &state),
+        Cmd::Doctor { report: false, state } => {
+            if !doctor::run(&cli.socket, &config_dir().join("host.toml"), &state) {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Logs { relay, host, follow, lines } => {
+            let role = if relay { Some(setup::Role::Relay) } else if host { Some(setup::Role::Host) } else { None };
+            setup::logs(role, follow, lines)?
+        }
+        Cmd::Update { check, yes } => setup::update(check, yes)?,
         Cmd::Status { json } => {
-            let v = call(Request::Status)?;
-            if json { show(v) } else { print_status(&v) }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&call(Request::Status)?)?)
+            } else {
+                print_status(&hostd::ask(&cli.socket, &Request::Status)?)
+            }
         }
-        Cmd::Discover => show(call(Request::Discover)?),
+        Cmd::Discover => print_discovered(&hostd::ask(&cli.socket, &Request::Discover)?),
         Cmd::Pair { address, code } => {
             let address = match address {
                 Some(a) => a,
-                None => {
-                    let found = discovery::browse(std::time::Duration::from_secs(3))?;
-                    let [only] = found.as_slice() else {
-                        anyhow::bail!("found {} relays; pass an address (see `plugover discover`)", found.len());
-                    };
-                    discovery::reachable(&only.addresses)
-                        .ok_or_else(|| anyhow::anyhow!("{} was announced but does not answer", only.name))?
-                        .to_string()
-                }
+                None => choose_relay()?,
             };
             let code = match code {
                 Some(c) => c,
-                None => {
-                    print!("Code from `sudo plugover code` on the relay ({address}): ");
-                    std::io::Write::flush(&mut std::io::stdout())?;
-                    let mut line = String::new();
-                    std::io::stdin().read_line(&mut line)?;
-                    line
-                }
+                None => ask(&format!("Code from {} on the relay: ", cmd(if cfg!(windows) { "plugover code" } else { "sudo plugover code" })))?,
             };
             let v = call(Request::Pair { address, code })?;
-            println!("Paired with {}.", v["relay"]["name"].as_str().unwrap_or("the relay"));
+            done(format!("Paired with {}.", paint(BOLD, v["relay"]["name"].as_str().unwrap_or("the relay"))));
+            println!("{} {}", paint(DIM, "Next, pick devices:"), cmd("plugover status"));
         }
-        Cmd::Forget { relay } => show(call(Request::Forget { relay })?),
-        Cmd::Auto { device, state, relay } => show(call(Request::Auto { relay, device, on: state == "on" })?),
-        Cmd::Session { state } => show(call(Request::Session { active: state == "start" })?),
-        Cmd::Attach { busid, relay } => show(call(Request::Attach { relay, busid })?),
-        Cmd::Detach { busid, relay } => show(call(Request::Detach { relay, busid })?),
+        Cmd::Forget { relay } => {
+            call(Request::Forget { relay: relay.clone() })?;
+            done(format!("Forgot {}.", paint(BOLD, relay)));
+        }
+        Cmd::Label { device, name, kind, reset } => {
+            if !reset && name.is_none() && kind.is_none() {
+                anyhow::bail!("pass --name, --kind or --reset");
+            }
+            call(Request::Label { device: device.clone(), name: name.clone(), kind })?;
+            let what = match (name, kind) {
+                (None, None) => "what Plugover detects".to_string(),
+                (Some(n), None) => paint(BOLD, n),
+                (None, Some(k)) => paint(BOLD, k.label()),
+                (Some(n), Some(k)) => format!("{} ({})", paint(BOLD, n), k.label()),
+            };
+            done(format!("{} now shows as {what}.", paint(ACCENT, &device)));
+        }
+        Cmd::Auto { device, state, relay, port } => {
+            let on = state == "on";
+            call(Request::Auto { relay, device: device.clone(), on, port: port.clone() })?;
+            let what = match &port {
+                Some(p) => format!("{} on port {}", paint(ACCENT, &device), paint(BOLD, p)),
+                None => paint(ACCENT, &device),
+            };
+            done(if on { format!("{what} connects whenever a stream runs.") } else { format!("Auto-connect is off for {what}.") });
+        }
+        Cmd::Session { state } => {
+            call(Request::Session { active: state == "start" })?;
+        }
+        Cmd::Attach { busid, relay } => {
+            let v = call(Request::Attach { relay, busid: busid.clone() })?;
+            done(format!("Connected {} (virtual port {}).", paint(BOLD, busid), v["port"]));
+        }
+        Cmd::Detach { busid, relay } => {
+            call(Request::Detach { relay, busid: busid.clone() })?;
+            done(format!("Disconnected {}. It stays unplugged until the next stream.", paint(BOLD, busid)));
+        }
     }
     Ok(())
+}
+
+/// Started from Explorer rather than a terminal: the console window is ours alone.
+#[cfg(windows)]
+fn double_clicked() -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+    }
+    let mut ids = [0u32; 2];
+    // SAFETY: the buffer is valid for the two entries we say it holds.
+    unsafe { GetConsoleProcessList(ids.as_mut_ptr(), 2) == 1 }
+}
+
+fn main() -> ExitCode {
+    #[cfg(windows)]
+    if env::args_os().len() == 1 && double_clicked() {
+        let args = setup::Args { pause: true, ..Default::default() };
+        return if setup::run(args).is_ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    }
+    let Err(e) = run(Cli::parse()) else { return ExitCode::SUCCESS };
+    if e.is::<setup::Reported>() {
+        return ExitCode::FAILURE;
+    }
+    eprintln!("{} {e:#}", paint(BAD.bold(), "error:"));
+    let denied = e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied));
+    if denied {
+        eprintln!("  {} this needs more rights; {SUDO}", paint(DIM, "→"));
+    }
+    ExitCode::FAILURE
 }

@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - name: Generated TypeScript types are committed
+        run: |
+          git status --porcelain plugin/ui/src/generated
+          test -z "$(git status --porcelain plugin/ui/src/generated)" || { echo "commit what cargo test generated"; exit 1; }
+      - run: cargo clippy --all-targets -- -D warnings
+      # Checking needs no linker, so this covers the Windows-only code without a Windows runner.
+      - run: cargo clippy --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+
+  plugin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run build
+      - name: Versions match
+        working-directory: .
+        run: |
+          rust=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          plugin=$(grep -m1 '"version"' plugin/package.json | cut -d'"' -f4)
+          test "$rust" = "$plugin" || { echo "Cargo.toml $rust, plugin $plugin"; exit 1; }

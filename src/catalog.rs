@@ -6,16 +6,29 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, sync::LazyLock};
 
 /// Declaration order is priority order when a device looks like several things.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, clap::ValueEnum)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Wheel,
     Pedals,
+    Shifter,
     Joystick,
     Gamepad,
     Keyboard,
     Mouse,
+    Audio,
+    Camera,
+    Bluetooth,
     Other,
+}
+
+/// A kind from a newer relay reads as Other instead of breaking the whole snapshot. The names are
+/// the lowercase ones clap and serde both use.
+impl<'de> Deserialize<'de> for Kind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(<Kind as clap::ValueEnum>::from_str(&String::deserialize(d)?, false).unwrap_or(Kind::Other))
+    }
 }
 
 impl Kind {
@@ -23,10 +36,14 @@ impl Kind {
         match self {
             Kind::Wheel => "Steering wheel",
             Kind::Pedals => "Pedals",
+            Kind::Shifter => "Shifter",
             Kind::Joystick => "Flight stick",
             Kind::Gamepad => "Controller",
             Kind::Keyboard => "Keyboard",
             Kind::Mouse => "Mouse",
+            Kind::Audio => "Audio device",
+            Kind::Camera => "Camera",
+            Kind::Bluetooth => "Bluetooth adapter",
             Kind::Other => "USB device",
         }
     }
@@ -38,15 +55,19 @@ impl Kind {
 
 /// Where the name came from, so the UI can say how sure it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     Catalog,
     UsbIds,
     Device,
     Unknown,
+    /// Set with `plugover label`.
+    User,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Identity {
     /// What the UI shows: "Logitech G29 Driving Force", without repeating the maker.
     pub title: String,
@@ -120,7 +141,7 @@ impl UsbIds {
 /// "Logitech, Inc." reads better as "Logitech".
 fn tidy_vendor(v: &str) -> String {
     let mut v = v.trim();
-    for suffix in [", Inc.", " Inc.", ", Ltd", " Co., Ltd", ", Ltd.", " Ltd.", " Corp.", " Corporation", ", LLC", " GmbH"] {
+    for suffix in [", Inc.", " Inc.", ", Ltd", " Co., Ltd", ", Ltd.", " Ltd.", " Corp.", " Corporation", ", LLC", " GmbH", " USA"] {
         v = v.strip_suffix(suffix).unwrap_or(v);
     }
     v.to_string()
@@ -132,6 +153,10 @@ pub fn blocked_reason(dev: &UsbDevice) -> Option<&'static str> {
     }
     if dev.class == 0x08 || dev.interfaces.iter().any(|i| i.class == 0x08) {
         return Some("storage device");
+    }
+    // Lending it out could cut the relay off the network.
+    if dev.interfaces.iter().any(|i| i.net) {
+        return Some("network adapter");
     }
     None
 }
@@ -155,7 +180,27 @@ pub fn identify(dev: &UsbDevice, ids: Option<&UsbIds>) -> Identity {
     Identity::new(name, maker, kind, source, blocked)
 }
 
+/// The catalog's title for a vendor:product id, for a device that is not plugged in.
+pub fn catalog_title(id: &str) -> Option<String> {
+    let (v, p) = id.split_once(':')?;
+    let e = CATALOG.get(&(u16::from_str_radix(v, 16).ok()?, u16::from_str_radix(p, 16).ok()?))?;
+    Some(Identity::new(e.name.clone(), e.maker.clone(), e.kind, Source::Catalog, None).title)
+}
+
 impl Identity {
+    /// Applies what the user set with `plugover label`; their name is shown as is.
+    pub fn relabel(&mut self, name: Option<&str>, kind: Option<Kind>) {
+        if let Some(name) = name {
+            (self.title, self.name) = (name.to_string(), name.to_string());
+        }
+        if let Some(kind) = kind {
+            self.kind = kind;
+        }
+        if name.is_some() || kind.is_some() {
+            self.source = Source::User;
+        }
+    }
+
     fn new(name: String, maker: String, kind: Kind, source: Source, blocked: Option<&'static str>) -> Self {
         let brand = maker.split_whitespace().next().unwrap_or_default();
         let title = if name.to_lowercase().starts_with(&brand.to_lowercase()) { name.clone() } else { format!("{maker} {name}") };
@@ -167,7 +212,16 @@ fn classify(dev: &UsbDevice, name: &str) -> Kind {
     let mut game: Option<Kind> = None;
     let mut basic: Option<Kind> = None;
     let mut both = false;
+    // Headsets and webcams also have HID buttons; the audio or video interface says what they are.
+    let mut media: Option<Kind> = None;
+    let mut bluetooth = false;
     for i in &dev.interfaces {
+        match (i.class, i.subclass, i.protocol) {
+            (0x0e, _, _) => media = Some(Kind::Camera),
+            (0x01, _, _) => media = media.or(Some(Kind::Audio)),
+            (0xe0, 0x01, 0x01) => bluetooth = true,
+            _ => {}
+        }
         let kind = i.hid.as_deref().and_then(hid_kind).or(match (i.class, i.subclass, i.protocol) {
             (0x03, 0x01, 0x01) => Some(Kind::Keyboard),
             (0x03, 0x01, 0x02) => Some(Kind::Mouse),
@@ -184,6 +238,9 @@ fn classify(dev: &UsbDevice, name: &str) -> Kind {
             None => {}
         }
     }
+    if let Some(k) = game.or(media) {
+        return k;
+    }
     // Mouse dongles often expose a keyboard interface first (and vice versa); the name settles it.
     if game.is_none() && both {
         let name = name.to_lowercase();
@@ -194,7 +251,7 @@ fn classify(dev: &UsbDevice, name: &str) -> Kind {
             return Kind::Keyboard;
         }
     }
-    game.or(basic).unwrap_or(Kind::Other)
+    basic.unwrap_or(if bluetooth { Kind::Bluetooth } else { Kind::Other })
 }
 
 /// Reads the top-level application collections and simulation usages of a HID report descriptor.
@@ -275,6 +332,13 @@ mod tests {
     const MOUSE_KB: &[u8] = &[0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0xc0, 0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0xc0];
 
     #[test]
+    fn unknown_kinds_are_other() {
+        let json = |kind: &str| format!(r#"{{"title":"T","name":"N","maker":"M","kind":"{kind}","source":"device","blocked":null}}"#);
+        assert_eq!(serde_json::from_str::<Identity>(&json("shifter")).unwrap().kind, Kind::Shifter);
+        assert_eq!(serde_json::from_str::<Identity>(&json("handbrake")).unwrap().kind, Kind::Other);
+    }
+
+    #[test]
     fn classifies_hid_descriptors() {
         assert_eq!(hid_kind(KEYBOARD), Some(Kind::Keyboard));
         assert_eq!(hid_kind(GAMEPAD), Some(Kind::Gamepad));
@@ -307,7 +371,7 @@ mod tests {
     }
 
     fn iface(class: u8, hid: Option<&[u8]>) -> Interface {
-        Interface { class, subclass: 0, protocol: 0, hid: hid.map(<[u8]>::to_vec) }
+        Interface { class, subclass: 0, protocol: 0, hid: hid.map(<[u8]>::to_vec), net: false }
     }
 
     #[test]
@@ -319,16 +383,34 @@ mod tests {
         let combo = identify(&device(0x1234, 0x0001, 0, vec![iface(3, Some(KEYBOARD)), iface(3, Some(GAMEPAD))]), None);
         assert_eq!((combo.kind, combo.source, combo.name.as_str()), (Kind::Gamepad, Source::Device, "Thing"));
 
-        let kb = Interface { class: 3, subclass: 1, protocol: 1, hid: None };
-        let mouse = Interface { class: 3, subclass: 1, protocol: 2, hid: None };
+        let kb = Interface { class: 3, subclass: 1, protocol: 1, hid: None, net: false };
+        let mouse = Interface { class: 3, subclass: 1, protocol: 2, hid: None, net: false };
         let mut dongle = device(0x373b, 0x101b, 0, vec![kb, mouse]);
         dongle.product = Some("ATK Mouse 8K Dongle".into());
         let dongle = identify(&dongle, None);
         assert_eq!((dongle.kind, dongle.title.as_str()), (Kind::Mouse, "ACME ATK Mouse 8K Dongle"));
 
+        // A USB mic: audio interfaces and a HID one for its mute button.
+        const CONSUMER: &[u8] = &[0x05, 0x0c, 0x09, 0x01, 0xa1, 0x01, 0xc0];
+        let mic = identify(&device(0x3299, 0x0009, 0, vec![iface(1, None), iface(1, None), iface(3, Some(CONSUMER))]), None);
+        assert_eq!(mic.kind, Kind::Audio);
+        let cam = identify(&device(0x046d, 0x085e, 0xef, vec![iface(0x0e, None), iface(0x0e, None), iface(1, None)]), None);
+        assert_eq!(cam.kind, Kind::Camera);
+        let bt = Interface { class: 0xe0, subclass: 1, protocol: 1, hid: None, net: false };
+        assert_eq!(identify(&device(0x0e8d, 0x0616, 0xef, vec![bt]), None).kind, Kind::Bluetooth);
+        let mut wifi = iface(0xff, None);
+        wifi.net = true;
+        assert_eq!(identify(&device(0x0bda, 0x8179, 0, vec![wifi]), None).blocked.as_deref(), Some("network adapter"));
+
+        let mut g29 = identify(&device(0x046d, 0xc24f, 0, vec![]), None);
+        g29.relabel(Some("Rig wheel"), None);
+        assert_eq!((g29.title.as_str(), g29.kind, g29.source), ("Rig wheel", Kind::Wheel, Source::User));
+
         let disk = identify(&device(0x0bc2, 0xab24, 0, vec![iface(8, None)]), None);
         assert_eq!(disk.blocked.as_deref(), Some("storage device"));
         assert_eq!(identify(&device(1, 1, 9, vec![]), None).blocked.as_deref(), Some("USB hub"));
+        assert_eq!(catalog_title("046d:c24f").as_deref(), Some("Logitech G29 Driving Force"));
+        assert_eq!(catalog_title("dead:beef"), None);
     }
 
     #[test]

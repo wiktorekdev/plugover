@@ -13,6 +13,8 @@ pub struct Interface {
     pub protocol: u8,
     /// HID report descriptor, present only while the interface is bound to usbhid.
     pub hid: Option<Vec<u8>>,
+    /// The kernel made a network interface out of it.
+    pub net: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +129,7 @@ fn read_interface(i: &Path) -> Interface {
         subclass: hex(i, "bInterfaceSubClass").unwrap_or(0),
         protocol: hex(i, "bInterfaceProtocol").unwrap_or(0),
         hid,
+        net: i.join("net").is_dir(),
     }
 }
 
@@ -187,16 +190,15 @@ pub fn export_claimed(sys: &Path) -> Vec<String> {
 const VHCI: &str = "devices/platform/vhci_hcd.0";
 const VDEV_ST_NULL: u32 = 4;
 
-fn free_port(status: &str, speed: u32) -> Option<u32> {
-    let hub = if speed >= 5 { "ss" } else { "hs" };
-    status.lines().skip(1).find_map(|l| {
+fn free_ports<'a>(status: &'a str, hub: &'a str) -> impl Iterator<Item = u32> + 'a {
+    status.lines().skip(1).filter_map(move |l| {
         let f: Vec<&str> = l.split_whitespace().collect();
-        if f.len() >= 3 && f[0] == hub && f[2].parse() == Ok(VDEV_ST_NULL) {
-            f[1].parse().ok()
-        } else {
-            None
-        }
+        (f.len() >= 3 && f[0] == hub && f[2].parse() == Ok(VDEV_ST_NULL)).then(|| f[1].parse().ok()).flatten()
     })
+}
+
+fn free_port(status: &str, speed: u32) -> Option<u32> {
+    free_ports(status, if speed >= 5 { "ss" } else { "hs" }).next()
 }
 
 /// Plugs the device in and returns the vhci port it landed on.
@@ -219,14 +221,82 @@ pub fn vhci_port_used(sys: &Path, port: u32) -> bool {
     })
 }
 
+/// Free vhci ports for (USB 2, USB 3) devices, or why vhci_hcd cannot be used.
+pub fn vhci_free(sys: &Path) -> io::Result<(usize, usize)> {
+    let status = fs::read_to_string(sys.join(VHCI).join("status"))?;
+    Ok((free_ports(&status, "hs").count(), free_ports(&status, "ss").count()))
+}
+
+/// Whether this user may plug devices in (opening `attach` writes nothing).
+pub fn vhci_writable(sys: &Path) -> bool {
+    fs::OpenOptions::new().write(true).open(sys.join(VHCI).join("attach")).is_ok()
+}
+
+pub fn export_available(sys: &Path) -> bool {
+    sys.join("bus/usb/drivers/usbip-host").is_dir()
+}
+
 pub fn vhci_detach(sys: &Path, port: u32) -> io::Result<()> {
     write(&sys.join(VHCI).join("detach"), &port.to_string())
+}
+
+/// Calls `on_usb` whenever the kernel reports a USB device or driver change (a uevent), so plugs
+/// show up at once instead of on the next poll.
+#[cfg(target_os = "linux")]
+pub fn watch(on_usb: impl Fn() + Send + 'static) -> io::Result<()> {
+    use socket2::{Domain, Protocol, SockAddr, SockAddrStorage, Socket, Type};
+    use std::io::Read;
+    const AF_NETLINK: u16 = 16;
+    const NETLINK_KOBJECT_UEVENT: i32 = 15;
+    const ENOBUFS: i32 = 105;
+    #[repr(C)]
+    struct SockaddrNl {
+        family: u16,
+        pad: u16,
+        pid: u32,
+        groups: u32,
+    }
+    let mut s = Socket::new(Domain::from(i32::from(AF_NETLINK)), Type::DGRAM, Some(Protocol::from(NETLINK_KOBJECT_UEVENT)))?;
+    let mut storage = SockAddrStorage::zeroed();
+    // SAFETY: sockaddr_nl is the address type of netlink sockets; group 1 is the kernel's uevents.
+    let addr = unsafe {
+        *storage.view_as::<SockaddrNl>() = SockaddrNl { family: AF_NETLINK, pad: 0, pid: 0, groups: 1 };
+        SockAddr::new(storage, size_of::<SockaddrNl>() as _)
+    };
+    s.bind(&addr)?;
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            match s.read(&mut buf) {
+                Ok(n) if is_usb_event(&buf[..n]) => on_usb(),
+                Ok(_) => {}
+                // Events were dropped, so something may have changed.
+                Err(e) if e.raw_os_error() == Some(ENOBUFS) => on_usb(),
+                Err(e) => return eprintln!("stopped watching for USB plugs: {e}"),
+            }
+        }
+    });
+    Ok(())
+}
+
+/// A uevent is `action@devpath` and then KEY=value fields, all NUL-separated.
+#[cfg(target_os = "linux")]
+fn is_usb_event(msg: &[u8]) -> bool {
+    msg.split(|&b| b == 0).any(|f| f == b"SUBSYSTEM=usb")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn usb_events() {
+        assert!(is_usb_event(b"add@/devices/pci0000:00/usb1/1-2\0ACTION=add\0SUBSYSTEM=usb\0DEVTYPE=usb_device\0"));
+        assert!(!is_usb_event(b"add@/devices/virtual/net/tun0\0ACTION=add\0SUBSYSTEM=net\0"));
+        assert!(!is_usb_event(b"add@/x\0SUBSYSTEM=usbmisc\0"));
+    }
 
     fn fake_sys() -> PathBuf {
         let root = std::env::temp_dir().join(format!("plugover-sysfs-{}", std::process::id()));
@@ -273,5 +343,10 @@ mod tests {
         assert_eq!(free_port(status, 2), Some(1));
         assert_eq!(free_port(status, 5), Some(8));
         assert_eq!(free_port("hub port sta\nhs  0000 006\n", 3), None);
+        let sys = std::env::temp_dir().join(format!("plugover-vhci-{}", std::process::id()));
+        fs::create_dir_all(sys.join(VHCI)).unwrap();
+        fs::write(sys.join(VHCI).join("status"), status).unwrap();
+        assert_eq!(vhci_free(&sys).unwrap(), (1, 1));
+        fs::remove_dir_all(sys).unwrap();
     }
 }

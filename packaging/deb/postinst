@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    if [ -n "$2" ]; then
+        echo "Run 'plugover setup --relay' or 'plugover setup --host' again to restart Plugover on the new version."
+    else
+        echo "Run 'plugover setup' to set this computer up as the relay or the host."
+    fi
+fi

@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: wiktorekdev.Plugover
+PackageVersion: __VERSION__
+InstallerType: portable
+Commands:
+- plugover
+MinimumOSVersion: 10.0.18362.0
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/wiktorekdev/plugover/releases/download/v__VERSION__/plugover-__VERSION__-windows-x86_64.exe
+  InstallerSha256: __SHA_WINDOWS_UPPER__
+ManifestType: installer
+ManifestVersion: 1.9.0

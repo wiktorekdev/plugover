@@ -11,8 +11,23 @@ use std::{fs, io::Write, path::Path};
 pub struct RelayState {
     /// Random id announced over mDNS, so hosts find the relay again after an address change.
     pub id: String,
+    /// vendor:product ids hosts may use. Unset shares every device except hubs and storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<Vec<String>>,
     #[serde(default)]
     pub hosts: Vec<PairedHost>,
+}
+
+impl RelayState {
+    /// Why a device stays on the relay even though it could be lent.
+    pub fn withheld(&self, id: &str) -> Option<&'static str> {
+        self.share.as_ref().is_some_and(|s| !s.iter().any(|d| d == id)).then_some("not shared by the relay")
+    }
+
+    /// One paired host by id or name.
+    pub fn host(&self, who: &str) -> Option<&PairedHost> {
+        self.hosts.iter().find(|h| h.id == who || h.name == who)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +68,38 @@ pub struct HostConfig {
     /// Devices passed through whenever a stream runs.
     #[serde(default)]
     pub auto: Vec<AutoRule>,
+    /// Names and kinds set with `plugover label`, for devices Plugover gets wrong.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub label: Vec<Label>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Label {
+    /// vendor:product.
+    pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::catalog::Kind>,
+}
+
+impl Label {
+    pub fn apply(labels: &[Label], id: &str, identity: &mut crate::catalog::Identity) {
+        if let Some(l) = labels.iter().find(|l| l.device == id) {
+            identity.relabel(l.name.as_deref(), l.kind);
+        }
+    }
+}
+
+/// Sets or, with neither a name nor a kind, removes the label of one model.
+pub fn set_label(labels: &mut Vec<Label>, device: String, name: Option<String>, kind: Option<crate::catalog::Kind>) -> Result<()> {
+    let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    anyhow::ensure!(name.as_ref().is_none_or(|n| n.chars().count() <= 60), "keep the name under 60 characters");
+    labels.retain(|l| l.device != device);
+    if name.is_some() || kind.is_some() {
+        labels.push(Label { device, name, kind });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +118,38 @@ pub struct AutoRule {
     pub relay: String,
     /// vendor:product.
     pub device: String,
+    /// What the device was called when the rule was made, to show it while it is unplugged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Only the device on this port (busid), for when several of the same model are plugged in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+}
+
+impl AutoRule {
+    pub fn matches(&self, relay: &str, device: &crate::proto::DeviceInfo) -> bool {
+        self.relay == relay && self.device == device.id && self.port.as_ref().is_none_or(|p| *p == device.busid)
+    }
+}
+
+/// Checks and normalizes a vendor:product id such as `046D:C24F`.
+pub fn device_id(input: &str) -> Result<String> {
+    let id = input.trim().to_lowercase();
+    let ok = id.len() == 9 && id.as_bytes()[4] == b':' && id.bytes().enumerate().all(|(i, b)| i == 4 || b.is_ascii_hexdigit());
+    anyhow::ensure!(ok, "{input:?} is not a USB id; they look like 046d:c24f (see `plugover status`)");
+    Ok(id)
+}
+
+/// Turns one auto-connect rule on or off. A rule for any port replaces every rule for that model;
+/// a rule for one port replaces the any-port rule and that port's, and keeps other ports' rules.
+pub fn set_auto(rules: &mut Vec<AutoRule>, rule: AutoRule, on: bool) {
+    rules.retain(|a| {
+        let same = a.relay == rule.relay && a.device == rule.device;
+        !same || (rule.port.is_some() && a.port.is_some() && a.port != rule.port)
+    });
+    if on {
+        rules.push(rule);
+    }
 }
 
 pub fn decode_key(hex_key: &str) -> Result<auth::Key> {
@@ -122,14 +201,70 @@ mod tests {
                 host_id: "01".into(),
                 key: "00".repeat(32),
             }],
-            auto: vec![AutoRule { relay: "ab".into(), device: "046d:c24f".into() }],
+            auto: vec![AutoRule { relay: "ab".into(), device: "046d:c24f".into(), title: Some("Logitech G29".into()), port: None }],
+            label: Vec::new(),
         };
+        let mut cfg = cfg;
+        set_label(&mut cfg.label, "0fd9:0080".into(), Some(" Stream Deck ".into()), None).unwrap();
+        set_label(&mut cfg.label, "0fd9:0080".into(), None, Some(crate::catalog::Kind::Other)).unwrap();
+        set_label(&mut cfg.label, "3299:0009".into(), Some("Mic".into()), Some(crate::catalog::Kind::Audio)).unwrap();
+        set_label(&mut cfg.label, "3299:0009".into(), Some("  ".into()), None).unwrap();
+        assert!(set_label(&mut cfg.label, "1111:2222".into(), Some("x".repeat(61)), None).is_err());
+        assert_eq!(cfg.label, [Label { device: "0fd9:0080".into(), name: None, kind: Some(crate::catalog::Kind::Other) }], "a new label replaces the old one; an empty one removes it");
         save(&path, &cfg).unwrap();
         let back: HostConfig = load(&path).unwrap();
-        assert_eq!(back.auto, cfg.auto);
+        assert_eq!((back.auto, back.label), (cfg.auto, cfg.label));
         assert_eq!(decode_key(&back.relay[0].key).unwrap(), [0u8; 32]);
         #[cfg(unix)]
         assert_eq!(std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&path).unwrap().permissions()) & 0o777, 0o600);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn auto_rules_per_port() {
+        let rule = |port: Option<&str>| AutoRule { relay: "r".into(), device: "045e:028e".into(), title: None, port: port.map(Into::into) };
+        let dev = |busid: &str| crate::proto::DeviceInfo {
+            busid: busid.into(),
+            id: "045e:028e".into(),
+            identity: crate::catalog::Identity {
+                title: "Pad".into(),
+                name: "Pad".into(),
+                maker: "Microsoft".into(),
+                kind: crate::catalog::Kind::Gamepad,
+                source: crate::catalog::Source::Device,
+                blocked: None,
+            },
+            lent_to: None,
+        };
+        let mut rules = Vec::new();
+        set_auto(&mut rules, rule(None), true);
+        assert!(rules[0].matches("r", &dev("1-2")) && rules[0].matches("r", &dev("1-3")), "any port");
+        set_auto(&mut rules, rule(Some("1-2")), true);
+        set_auto(&mut rules, rule(Some("1-3")), true);
+        assert_eq!(rules.len(), 2, "port rules replace the any-port rule and keep each other");
+        assert!(!rules[0].matches("r", &dev("1-4")) && !rules[0].matches("x", &dev("1-2")));
+        set_auto(&mut rules, rule(Some("1-2")), false);
+        assert_eq!(rules.iter().map(|r| r.port.as_deref()).collect::<Vec<_>>(), [Some("1-3")]);
+        set_auto(&mut rules, rule(None), false);
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn device_ids() {
+        assert_eq!(device_id(" 046D:C24F ").unwrap(), "046d:c24f");
+        assert!(device_id("046d-c24f").is_err());
+        assert!(device_id("46d:c24f").is_err());
+        assert!(device_id("046g:c24f").is_err());
+    }
+
+    #[test]
+    fn share_list_withholds_the_rest() {
+        let mut st = RelayState::default();
+        assert_eq!(st.withheld("046d:c24f"), None, "no list shares everything");
+        st.share = Some(vec!["046d:c24f".into()]);
+        assert_eq!(st.withheld("046d:c24f"), None);
+        assert!(st.withheld("045e:028e").is_some());
+        let back: RelayState = toml::from_str(&toml::to_string_pretty(&st).unwrap()).unwrap();
+        assert_eq!(back.share, st.share);
     }
 }

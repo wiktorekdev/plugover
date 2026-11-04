@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: wiktorekdev.Plugover
+PackageVersion: __VERSION__
+PackageLocale: en-US
+Publisher: wiktorekdev
+PublisherUrl: https://github.com/wiktorekdev
+PackageName: Plugover
+PackageUrl: https://github.com/wiktorekdev/plugover
+License: MIT
+LicenseUrl: https://github.com/wiktorekdev/plugover/blob/main/LICENSE
+ShortDescription: Hands USB devices plugged into one machine to a punktfunk host over the network.
+Description: Run `plugover setup` after installing to set this computer up as the relay or the host.
+Tags:
+- usb
+- usbip
+- punktfunk
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

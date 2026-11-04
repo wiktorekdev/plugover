@@ -1,13 +1,17 @@
 [package]
 name = "plugover"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Hands USB devices plugged into one machine to a punktfunk host over the network"
 license = "MIT"
 
 [dependencies]
+# Both already come with clap; listed to color our own output the same way.
+anstream = "1.0.0"
+anstyle = "1.0.14"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+crossterm = { version = "0.29.0", default-features = false, features = ["events", "windows"] }
 getrandom = "0.4.3"
 hex = "0.4.3"
 hmac = "0.13.0"
@@ -18,3 +22,6 @@ sha2 = "0.11.1"
 socket2 = { version = "0.6.5", features = ["all"] }
 spake2 = "0.4.0"
 toml = "1.1.8"
+
+[dev-dependencies]
+ts-rs = "12.0.1"

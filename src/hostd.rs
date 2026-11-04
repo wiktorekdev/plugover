@@ -4,7 +4,7 @@
 //! on Windows.
 
 use crate::{
-    discovery, host,
+    api, catalog, discovery, host,
     proto::{self, Snapshot},
     state::{self, AutoRule, HostConfig, PairedRelay},
     vhci,
@@ -33,8 +33,23 @@ pub enum Request {
     /// `code` is what `plugover code` printed on the relay.
     Pair { address: String, code: String },
     Forget { relay: String },
-    /// Pass `device` (vendor:product) through whenever a stream runs.
-    Auto { relay: Option<String>, device: String, on: bool },
+    /// Pass `device` (vendor:product) through whenever a stream runs; with `port`, only the one
+    /// plugged in there.
+    Auto {
+        relay: Option<String>,
+        device: String,
+        on: bool,
+        #[serde(default)]
+        port: Option<String>,
+    },
+    /// Names a model, or corrects its kind; neither removes the label.
+    Label {
+        device: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        kind: Option<catalog::Kind>,
+    },
     Attach { relay: Option<String>, busid: String },
     Detach { relay: Option<String>, busid: String },
     /// The plugin sends this when a stream starts and stops.
@@ -50,6 +65,8 @@ pub struct Daemon {
     cfg: Mutex<HostConfig>,
     /// Latest snapshot per relay id; present means online.
     live: Mutex<HashMap<String, Snapshot>>,
+    /// Why each offline relay is offline.
+    errors: Mutex<HashMap<String, String>>,
     /// Devices we plugged in, and the vhci port each one landed on.
     attached: Mutex<HashMap<Slot, vhci::Attachment>>,
     /// Detached by hand during this stream; not plugged back in until the next one.
@@ -67,6 +84,7 @@ impl Daemon {
             config_path,
             name: state::hostname(),
             live: Mutex::default(),
+            errors: Mutex::default(),
             attached: Mutex::default(),
             held: Mutex::default(),
             watched: Mutex::default(),
@@ -122,16 +140,18 @@ impl Daemon {
                         eprintln!("{} is online at {}", relay.name, relay.address);
                         was_online = true;
                     }
+                    me.errors.lock().unwrap().remove(&id);
                     me.live.lock().unwrap().insert(id.clone(), snap);
                     me.reconcile();
                     me.relay(&id).is_some()
                 });
                 me.live.lock().unwrap().remove(&id);
+                let why = result.err().map_or("relay forgotten".to_string(), |e| format!("{e:#}"));
                 if was_online {
-                    let why = result.err().map_or("relay forgotten".to_string(), |e| format!("{e:#}"));
                     eprintln!("{} went offline: {why}", relay.name);
                     was_online = false;
                 }
+                me.errors.lock().unwrap().insert(id.clone(), why);
                 me.rediscover(&id);
                 thread::sleep(Duration::from_secs(2));
             }
@@ -167,7 +187,7 @@ impl Daemon {
                 .flat_map(|(relay, snap, rule)| {
                     snap.devices
                         .iter()
-                        .filter(|d| d.id == rule.device && d.identity.blocked.is_none() && d.lent_to.is_none())
+                        .filter(|d| rule.matches(&rule.relay, d) && d.identity.blocked.is_none() && d.lent_to.is_none())
                         .map(|d| (relay.id.clone(), d.busid.clone()))
                         .filter(|slot| !attached.contains_key(slot) && !held.contains(slot))
                         .map(|(_, busid)| (relay.clone(), busid))
@@ -203,16 +223,46 @@ impl Daemon {
         }
     }
 
+    /// Turning auto-connect off gives the device back now, not only when the stream ends.
+    fn release(&self, relay: &str, device: &str) {
+        let _pass = self.reconciling.lock().unwrap();
+        let gone: Vec<Slot> = {
+            let (cfg, live, attached) = (self.cfg.lock().unwrap(), self.live.lock().unwrap(), self.attached.lock().unwrap());
+            let devices = live.get(relay).map_or(&[][..], |s| &s.devices[..]);
+            attached
+                .keys()
+                .filter(|(r, busid)| {
+                    r == relay
+                        && devices.iter().any(|d| d.busid == *busid && d.id == device && !cfg.auto.iter().any(|a| a.matches(relay, d)))
+                })
+                .cloned()
+                .collect()
+        };
+        for slot in gone {
+            let Some(a) = self.attached.lock().unwrap().remove(&slot) else { continue };
+            if let Err(e) = vhci::detach(&self.sys, &a) {
+                eprintln!("could not unplug {}: {e}", slot.1);
+            }
+        }
+    }
+
     fn handle(self: &Arc<Self>, req: Request) -> Result<Value> {
         Ok(match req {
-            Request::Status => self.status(),
+            Request::Status => reply(self.status())?,
             Request::Discover => {
                 let paired: HashSet<String> = self.cfg.lock().unwrap().relay.iter().map(|r| r.id.clone()).collect();
-                let found = discovery::browse(Duration::from_secs(3))?;
-                json!({ "ok": true, "relays": found.iter().map(|f| json!({
-                    "id": f.id, "name": f.name, "paired": paired.contains(&f.id),
-                    "addresses": f.addresses.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
-                })).collect::<Vec<_>>() })
+                let relays = discovery::browse(Duration::from_secs(3))?
+                    .into_iter()
+                    .map(|f| api::Found {
+                        paired: paired.contains(&f.id),
+                        // Relays announce docker bridges and VPNs too; this is the one that answers.
+                        address: discovery::reachable(&f.addresses).map(|a| a.to_string()),
+                        addresses: f.addresses.iter().map(|a| a.to_string()).collect(),
+                        id: f.id,
+                        name: f.name,
+                    })
+                    .collect();
+                reply(api::Discovered { relays })?
             }
             Request::Pair { address, code } => {
                 let relay = host::pair(&address, &self.name, &code)?;
@@ -230,18 +280,29 @@ impl Daemon {
                 cfg.relay.retain(|r| r.id != id);
                 cfg.auto.retain(|a| a.relay != id);
                 self.save(&cfg)?;
+                drop(cfg);
+                self.errors.lock().unwrap().remove(&id);
                 json!({ "ok": true })
             }
-            Request::Auto { relay, device, on } => {
-                let rule = AutoRule { relay: self.pick(relay.as_deref())?.id, device: device.to_lowercase() };
+            Request::Auto { relay, device, on, port } => {
+                let (relay, device) = (self.pick(relay.as_deref())?.id, state::device_id(&device)?);
+                let title = self.live.lock().unwrap().get(&relay).and_then(|snap| {
+                    snap.devices.iter().find(|d| d.id == device).map(|d| d.identity.title.clone())
+                });
                 let mut cfg = self.cfg.lock().unwrap();
-                cfg.auto.retain(|a| *a != rule);
-                if on {
-                    cfg.auto.push(rule);
-                }
+                state::set_auto(&mut cfg.auto, AutoRule { relay: relay.clone(), device: device.clone(), title, port }, on);
                 self.save(&cfg)?;
                 drop(cfg);
+                if !on {
+                    self.release(&relay, &device);
+                }
                 self.reconcile();
+                json!({ "ok": true })
+            }
+            Request::Label { device, name, kind } => {
+                let mut cfg = self.cfg.lock().unwrap();
+                state::set_label(&mut cfg.label, state::device_id(&device)?, name, kind)?;
+                self.save(&cfg)?;
                 json!({ "ok": true })
             }
             Request::Attach { relay, busid } => {
@@ -268,30 +329,59 @@ impl Daemon {
         })
     }
 
-    fn status(&self) -> Value {
+    fn status(&self) -> api::Status {
         let (cfg, live) = (self.cfg.lock().unwrap(), self.live.lock().unwrap());
-        let attached = self.attached.lock().unwrap();
-        let relays: Vec<Value> = cfg
+        let (attached, errors) = (self.attached.lock().unwrap(), self.errors.lock().unwrap());
+        let relays = cfg
             .relay
             .iter()
             .map(|r| {
-                let devices: Vec<Value> = live.get(&r.id).map_or(Vec::new(), |snap| {
-                    snap.devices
-                        .iter()
-                        .map(|d| {
-                            let mut v = serde_json::to_value(d).unwrap_or_default();
-                            let here = attached.contains_key(&(r.id.clone(), d.busid.clone()))
-                                || d.lent_to.as_deref() == Some(self.name.as_str());
-                            v["state"] = json!(if here { "here" } else if d.lent_to.is_some() { "elsewhere" } else { "free" });
-                            v["auto"] = json!(cfg.auto.iter().any(|a| a.relay == r.id && a.device == d.id));
-                            v
-                        })
-                        .collect()
-                });
-                json!({ "id": r.id, "name": r.name, "address": r.address, "online": live.contains_key(&r.id), "devices": devices })
+                let snap = live.get(&r.id);
+                let devices = snap.map_or(&[][..], |s| &s.devices[..]);
+                let rules: Vec<&AutoRule> = cfg.auto.iter().filter(|a| a.relay == r.id).collect();
+                let status = |d: &proto::DeviceInfo| {
+                    let here = attached.contains_key(&(r.id.clone(), d.busid.clone())) || d.lent_to.as_deref() == Some(self.name.as_str());
+                    let matched: Vec<&&AutoRule> = rules.iter().filter(|a| a.matches(&r.id, d)).collect();
+                    let mut info = d.clone();
+                    state::Label::apply(&cfg.label, &d.id, &mut info.identity);
+                    api::DeviceStatus {
+                        info,
+                        state: if here { api::DeviceState::Here } else if d.lent_to.is_some() { api::DeviceState::Elsewhere } else { api::DeviceState::Free },
+                        auto: !matched.is_empty(),
+                        auto_port: matched.iter().any(|a| a.port.is_some()),
+                    }
+                };
+                // Chosen devices that are not plugged into the relay (or it is offline).
+                let missing = rules
+                    .iter()
+                    .filter(|a| !devices.iter().any(|d| a.matches(&r.id, d)))
+                    .map(|a| api::Missing {
+                        id: a.device.clone(),
+                        // Rules from before 0.5 have no title; the catalog may still know the device.
+                        title: cfg
+                            .label
+                            .iter()
+                            .find(|l| l.device == a.device)
+                            .and_then(|l| l.name.clone())
+                            .or_else(|| a.title.clone())
+                            .or_else(|| catalog::catalog_title(&a.device))
+                            .unwrap_or_else(|| a.device.clone()),
+                        port: a.port.clone(),
+                    })
+                    .collect();
+                api::RelayStatus {
+                    id: r.id.clone(),
+                    name: r.name.clone(),
+                    address: r.address.clone(),
+                    online: snap.is_some(),
+                    version: snap.map(|s| s.version.clone()).filter(|v| !v.is_empty()),
+                    error: if snap.is_some() { None } else { errors.get(&r.id).cloned() },
+                    devices: devices.iter().map(status).collect(),
+                    missing,
+                }
             })
             .collect();
-        json!({ "ok": true, "host": self.name, "session": self.session.load(Ordering::SeqCst), "relays": relays })
+        api::Status { host: self.name.clone(), version: proto::VERSION.into(), session: self.session.load(Ordering::SeqCst), relays }
     }
 
     fn answer<S: Read + Write>(me: &Arc<Self>, read: S, mut write: S, token: Option<&str>) {
@@ -366,6 +456,18 @@ fn parse(line: &str, token: Option<&str>) -> Result<Request> {
         bail!("missing or wrong token");
     }
     serde_json::from_value(v).context("bad request")
+}
+
+/// A successful answer: the value's fields plus `"ok": true`.
+fn reply(value: impl Serialize) -> Result<Value> {
+    let mut v = serde_json::to_value(value)?;
+    v["ok"] = json!(true);
+    Ok(v)
+}
+
+/// One request to a running daemon, read back as `T`.
+pub fn ask<T: serde::de::DeserializeOwned>(endpoint: &Path, req: &Request) -> Result<T> {
+    serde_json::from_value(call(endpoint, req)?).context("the host daemon answered something this version does not understand")
 }
 
 /// One request to a running daemon.

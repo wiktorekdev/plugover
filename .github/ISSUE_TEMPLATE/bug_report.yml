@@ -2,34 +2,57 @@ name: Bug report
 description: Something doesn't work
 labels: [bug]
 body:
-  - type: input
-    id: version
+  - type: markdown
     attributes:
-      label: Plugover version
-      description: Output of `plugover --version` on the host and on the relay
-      placeholder: 0.4.0 / 0.4.0
+      value: Run `plugover doctor` on both machines first; it often names the problem and the fix.
+  - type: dropdown
+    id: relay
+    attributes:
+      label: Relay system
+      options:
+        - Linux x86_64
+        - Linux ARM64
+        - Linux ARMv7
+        - Windows
     validations:
       required: true
   - type: dropdown
-    id: setup
+    id: host
     attributes:
-      label: Setup
+      label: Host system
       options:
-        - Linux relay + Linux host
-        - Linux relay + Windows host
-        - Windows relay + Linux host
-        - Windows relay + Windows host
+        - Linux x86_64
+        - Linux ARM64
+        - Linux ARMv7
+        - Windows
     validations:
       required: true
   - type: input
     id: device
     attributes:
       label: USB device
+      description: The id and name from `plugover status`
       placeholder: 046d:c24f Logitech G29
   - type: textarea
     id: what
     attributes:
       label: What happened
-      description: What you expected and what you got. Include `plugover status` and relevant logs (`journalctl -u plugover-relay`, `journalctl --user -u plugover-host`).
+      description: What you did, what you expected and what you got.
+    validations:
+      required: true
+  - type: textarea
+    id: relay-report
+    attributes:
+      label: Relay report
+      description: Output of `plugover doctor --report` on the relay
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: host-report
+    attributes:
+      label: Host report
+      description: Output of `plugover doctor --report` on the host
+      render: text
     validations:
       required: true

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+if [ "$1" = remove ]; then
+    echo "If Plugover is still set up here, run 'plugover setup --uninstall' first."
+fi

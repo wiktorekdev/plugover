@@ -3,9 +3,10 @@
 // the daemon, which runs outside the plugin sandbox.
 
 import { type Punktfunk, definePlugin, servePluginUi } from "@punktfunk/host";
+import pkg from "../package.json" with { type: "json" };
 import { daemon } from "./daemon";
 
-const UI_OPS = new Set(["status", "discover", "pair", "forget", "auto", "attach", "detach"]);
+const UI_OPS = new Set(["status", "discover", "pair", "forget", "auto", "label", "attach", "detach"]);
 const RESYNC_MS = 10_000;
 
 const json = (body: unknown, status = 200) =>
@@ -61,9 +62,9 @@ export default definePlugin({
 		followStreams(pf);
 		await servePluginUi(pf, {
 			id: "plugover",
-			title: "USB devices",
+			title: "Plugover",
 			icon: "cable",
-			version: "0.4.0",
+			version: pkg.version,
 			staticDir: new URL("./ui", import.meta.url),
 			fetch: handle,
 		});
