@@ -428,6 +428,9 @@ pub fn print_lines(lines: &[Line]) {
     }
 }
 
+/// The Windows console's font has no ❯.
+const POINTER: &str = if cfg!(windows) { ">" } else { "❯" };
+
 /// Arrow keys (or j/k, or a digit) and Enter.
 fn menu(items: &[(&str, &str)], default: usize) -> Result<usize> {
     let mut out = stdout();
@@ -435,7 +438,13 @@ fn menu(items: &[(&str, &str)], default: usize) -> Result<usize> {
     let mut sel = default;
     terminal::enable_raw_mode()?;
     crossterm::execute!(out, cursor::Hide)?;
+    let mut drawn = false;
     let picked = loop {
+        // Redraw over the last menu, also after events that change nothing (key releases on Windows).
+        if drawn {
+            crossterm::queue!(out, cursor::MoveUp(n as u16))?;
+        }
+        drawn = true;
         for (i, (label, desc)) in items.iter().enumerate() {
             crossterm::queue!(out, terminal::Clear(ClearType::CurrentLine))?;
             if i == sel {
@@ -443,7 +452,7 @@ fn menu(items: &[(&str, &str)], default: usize) -> Result<usize> {
                     out,
                     SetForegroundColor(Color::AnsiValue(141)),
                     SetAttribute(Attribute::Bold),
-                    Print(format!("  ❯ {label:<10}")),
+                    Print(format!("  {POINTER} {label:<10}")),
                     SetAttribute(Attribute::Reset),
                     Print(format!(" {}\r\n", strip(desc))),
                 )?;
@@ -472,7 +481,6 @@ fn menu(items: &[(&str, &str)], default: usize) -> Result<usize> {
             KeyCode::Esc | KeyCode::Char('q') => break Err(anyhow::anyhow!("cancelled")),
             _ => {}
         }
-        crossterm::queue!(out, cursor::MoveUp(n as u16))?;
     };
     crossterm::execute!(out, cursor::Show)?;
     terminal::disable_raw_mode()?;

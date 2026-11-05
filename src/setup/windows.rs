@@ -25,11 +25,13 @@ fn installed_exe() -> PathBuf {
 
 /// Runs a PowerShell script. Passed encoded, so no quoting survives the command line by luck.
 fn ps(script: &str) -> Result<String> {
-    let utf16: Vec<u8> = format!("$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n{script}")
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect();
-    exec(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &base64(&utf16)]))
+    let script = encode(&format!("$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n{script}"));
+    exec(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &script]))
+}
+
+/// A script for `powershell -EncodedCommand`.
+fn encode(script: &str) -> String {
+    base64(&script.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>())
 }
 
 fn base64(data: &[u8]) -> String {
@@ -73,9 +75,20 @@ pub fn prepare(args: &Args) -> Result<()> {
     }
     args.extend(["--pause".into(), "--elevated".into()]);
     println!("\n  {}", paint(DIM, "Setup needs administrator rights; Windows asks for them now."));
-    let list = args.iter().map(q).collect::<Vec<_>>().join(",");
-    ps(&format!("Start-Process -Verb RunAs -FilePath {} -ArgumentList {list}", q(&me)))
-        .context("Windows did not give administrator rights")?;
+    let args: Vec<String> = args.iter().map(q).collect();
+    // Windows opens an elevated console program in the old console window, so setup asks for
+    // Windows Terminal when it is there.
+    let run = encode(&format!("& {} {}", q(&me), args.join(" ")));
+    ps(&format!(
+        "if (Get-Command wt.exe -ErrorAction SilentlyContinue) {{
+             Start-Process -Verb RunAs -FilePath wt.exe -ArgumentList 'powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {run}'
+         }} else {{
+             Start-Process -Verb RunAs -FilePath {} -ArgumentList {}
+         }}",
+        q(&me),
+        args.join(",")
+    ))
+    .context("Windows did not give administrator rights")?;
     println!("  {}", paint(DIM, "Setup continues in the new window."));
     std::process::exit(0);
 }
@@ -430,7 +443,9 @@ fn add_plugin(punktfunk: &Path) -> Result<()> {
     fs::create_dir_all(&vendor)?;
     let path = vendor.join(plugin_file());
     fs::write(&path, PLUGIN)?;
-    exec(Command::new(punktfunk).args(["plugins", "add"]).arg(&path).arg("--allow-public-registry"))?;
+    // punktfunk takes a spec without a '/' for one of its own package names.
+    let spec = path.to_string_lossy().replace('\\', "/");
+    exec(Command::new(punktfunk).args(["plugins", "add", &spec, "--allow-public-registry"]))?;
     exec(Command::new(punktfunk).args(["plugins", "enable"])).map(drop)
 }
 
