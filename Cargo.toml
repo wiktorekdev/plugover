@@ -1,6 +1,6 @@
 [package]
 name = "plugover"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Hands USB devices plugged into one machine to a punktfunk host over the network"
 license = "MIT"
@@ -14,6 +14,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 crossterm = { version = "0.29.0", default-features = false, features = ["events", "windows"] }
 getrandom = "0.4.3"
 hex = "0.4.3"
+libc = "0.2.191"
 hmac = "0.13.0"
 mdns-sd = "0.21.6"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -22,6 +23,8 @@ sha2 = "0.11.1"
 socket2 = { version = "0.6.5", features = ["all"] }
 spake2 = "0.4.0"
 toml = "1.1.8"
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes"] }
+ed25519-dalek = { version = "2", default-features = false }
 
 [dev-dependencies]
 ts-rs = "12.0.1"

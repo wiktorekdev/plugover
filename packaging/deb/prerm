@@ -1,5 +1,9 @@
 #!/bin/sh
 set -e
 if [ "$1" = remove ]; then
-    echo "If Plugover is still set up here, run 'plugover setup --uninstall' first."
+    # The relay service runs this package's binary; take it down cleanly before the binary goes.
+    if [ -f /etc/systemd/system/plugover-relay.service ] && grep -q '^ExecStart=/usr/bin/plugover ' /etc/systemd/system/plugover-relay.service; then
+        /usr/bin/plugover setup --uninstall --yes || echo "Could not remove the Plugover relay service; run 'plugover setup --uninstall' before reinstalling."
+    fi
+    echo "If this computer is a Plugover host, run 'systemctl --user disable --now plugover-host' as your user."
 fi

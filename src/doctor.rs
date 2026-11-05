@@ -72,6 +72,8 @@ fn check_relay(state_path: &Path) -> bool {
         fail("usbipd-win", "not found", Some("run the installer again"));
     }
     #[cfg(not(windows))]
+    kernel_tls();
+    #[cfg(not(windows))]
     if crate::sysfs::export_available(SYS.as_ref()) {
         ok("usbip-host", "loaded");
     } else {
@@ -116,6 +118,7 @@ fn check_host(endpoint: &Path) -> bool {
                 fail("vhci-hcd", "kernel module not loaded", Some("sudo modprobe vhci-hcd"));
             }
         }
+        kernel_tls();
         if crate::sysfs::vhci_writable(sys) {
             ok("Plugging devices in", "allowed for this user");
         } else {
@@ -155,7 +158,7 @@ fn check_host(endpoint: &Path) -> bool {
         warn("Host daemon", format!("runs Plugover {}, this command {}", daemon.unwrap_or("older than 0.5"), proto::VERSION), Some(hint));
     }
     if status.relays.is_empty() {
-        warn("Relays", "none paired", Some(&format!("{}, or USB devices in the punktfunk console", cmd("plugover pair"))));
+        warn("Relays", "none paired", Some(&format!("{}, or Plugover in the punktfunk console", cmd("plugover pair"))));
     }
     for r in &status.relays {
         healthy &= check_paired(r, daemon);
@@ -175,20 +178,66 @@ fn check_paired(r: &RelayStatus, ours: Option<&str>) -> bool {
         fail(&name, format!("offline at {}: {why}", r.address), Some(&hint));
         return false;
     }
+    let at = match r.latency {
+        Some(l) => format!("online at {}, {:.1} ms", r.address, l.average),
+        None => format!("online at {}", r.address),
+    };
+    if r.unencrypted {
+        warn("Encryption", "off: anyone on your network could watch its devices or fake their input", Some(&format!("update Plugover on {}", r.name)));
+    } else if !r.encrypted {
+        fail(
+            "Encryption",
+            format!("{} cannot encrypt, so its devices do not connect", r.name),
+            Some(&format!("update Plugover on it, or {}", cmd(&format!("plugover unencrypted {} on", r.name)))),
+        );
+    }
     match (r.version.as_deref(), ours) {
         (theirs, Some(ours)) if theirs != Some(ours) => warn(
             &name,
-            format!("online, but runs Plugover {} and this host {ours}", theirs.unwrap_or("older than 0.5")),
-            // Only 0.5 and later have `update`.
-            Some(&if theirs.is_some() { format!("{} on {}", cmd("plugover update"), r.name) } else { format!("run the installer on {}", r.name) }),
+            format!("{at}, but runs Plugover {} and this host {ours}", theirs.unwrap_or("older than 0.5")),
+            Some(&match theirs {
+                Some(t) if crate::setup::newer(t, ours) => format!("{} here", cmd("plugover update")),
+                Some(_) => format!("{} on {}", cmd("plugover update"), r.name),
+                // Only 0.5 and later have `update`.
+                None => format!("run the installer on {}", r.name),
+            }),
         ),
-        _ => ok(&name, format!("online at {}", r.address)),
+        _ => ok(&name, at),
+    }
+    if let Some(l) = r.latency.filter(|l| !l.good()) {
+        warn(
+            "Network",
+            format!("{:.1} ms on average, varying by {:.1} ms", l.average, l.jitter),
+            Some("force feedback needs a steady link; connect both computers by cable"),
+        );
+    }
+    let mut healthy = r.encrypted || r.unencrypted;
+    for d in r.devices.iter().filter(|d| d.history.drops > 0) {
+        warn(&d.info.identity.title, format!("dropped out {} since the host daemon started", times(d.history.drops)), Some("usually the network; see the latency above"));
+    }
+    for d in r.devices.iter().filter(|d| d.error.is_some()) {
+        healthy = false;
+        fail(&d.info.identity.title, format!("could not connect: {}", d.error.as_deref().unwrap_or_default()), None);
     }
     let waiting: Vec<&str> = r.missing.iter().map(|m| m.title.as_str()).collect();
     if !waiting.is_empty() {
         warn("Auto-connect", format!("not plugged into the relay: {}", waiting.join(", ")), None);
     }
-    true
+    healthy
+}
+
+/// Where USB traffic gets encrypted; either way it is, the kernel is only quicker.
+#[cfg(not(windows))]
+fn kernel_tls() {
+    if crate::net::kernel_encrypts() {
+        ok("Encryption", "in the kernel");
+    } else {
+        warn("Encryption", "by Plugover, as the kernel's tls module is not loaded", Some("sudo modprobe tls, for a little less delay"));
+    }
+}
+
+fn times(n: u32) -> String {
+    if n == 1 { "once".into() } else { format!("{n} times") }
 }
 
 fn sudo(c: &str) -> String {

@@ -327,7 +327,11 @@ fn plan_relay(found: &Found, d: &Detected, ctx: &Ctx) -> Result<Plan> {
         line(Mark::Ok, "usbipd-win", "up to date")
     });
     lines.push(install_line(&found.relay, "relay"));
-    lines.push(line(Mark::Todo, "Set up the firewall", "Plugover on TCP 7275 from the local network; usbipd's own port 3240 blocked"));
+    // Windows knows the local network by itself; --lan narrows or widens it.
+    let lan = ctx.args.lan.as_deref().map(networks).transpose()?;
+    let remote = lan.as_ref().map_or("LocalSubnet".into(), |l| l.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(","));
+    let from = lan.map_or("the local network".into(), |l| l.join(", "));
+    lines.push(line(Mark::Todo, "Set up the firewall", format!("Plugover on TCP 7275 from {from}; usbipd's own port 3240 blocked")));
     let new_code = found.relay.is_none() || (ctx.interactive && !ctx.args.yes && ctx.confirm("Print a new pairing code at the end?", false)?);
     if new_code {
         lines.push(line(Mark::Todo, "Print a pairing code", "you type it on the host"));
@@ -338,7 +342,7 @@ fn plan_relay(found: &Found, d: &Detected, ctx: &Ctx) -> Result<Plan> {
         steps.push((format!("Installing usbipd-win {USBIPD_VERSION}"), Box::new(install_usbipd)));
     }
     steps.push((format!("Installing plugover {VERSION}"), Box::new(install_self)));
-    steps.push(("Setting up the firewall".into(), Box::new(relay_firewall)));
+    steps.push(("Setting up the firewall".into(), Box::new(move || relay_firewall(&remote))));
     steps.push(("Starting the relay".into(), Box::new(|| register_task(RELAY_TASK, "relay", "relay.log"))));
     steps.push(("Checking that the relay answers".into(), Box::new(|| wait_for("the relay", relay_answers))));
     let after: Action = Box::new(move || {
@@ -349,7 +353,7 @@ fn plan_relay(found: &Found, d: &Detected, ctx: &Ctx) -> Result<Plan> {
         } else {
             ok("The relay is up to date", "pairings are kept");
         }
-        println!("\n  {} on the host, open USB devices in the punktfunk console, or run {}.", paint(DIM, "Next:"), cmd("plugover pair"));
+        println!("\n  {} on the host, open Plugover in the punktfunk console, or run {}.", paint(DIM, "Next:"), cmd("plugover pair"));
         Ok(())
     });
     Ok(Plan { lines, steps, root: true, after })
@@ -357,12 +361,12 @@ fn plan_relay(found: &Found, d: &Detected, ctx: &Ctx) -> Result<Plan> {
 
 /// usbipd has no authentication of its own: anyone who reaches its port could skip pairing. Only
 /// Plugover talks to it, over loopback, which Windows Firewall does not filter.
-fn relay_firewall() -> Result<()> {
+fn relay_firewall(remote: &str) -> Result<()> {
     let exe = q(installed_exe());
     let mut script = String::from("Get-NetFirewallRule -DisplayName 'usbipd' -ErrorAction SilentlyContinue | Disable-NetFirewallRule\n");
     script += &firewall_rule("Plugover (block usbipd)", "-Protocol TCP -LocalPort 3240 -Action Block");
     script += &firewall_rule("Plugover (mDNS)", &format!("-Program {exe} -Protocol UDP -LocalPort 5353 -Action Allow"));
-    script += &firewall_rule("Plugover relay", &format!("-Program {exe} -Protocol TCP -LocalPort 7275 -RemoteAddress LocalSubnet -Action Allow"));
+    script += &firewall_rule("Plugover relay", &format!("-Program {exe} -Protocol TCP -LocalPort 7275 -RemoteAddress {remote} -Action Allow"));
     script += "if ((Get-NetFirewallProfile | Where-Object { -not $_.Enabled }).Count -gt 0) { 'firewall-off' }";
     if ps(&script)?.contains("firewall-off") {
         warn("Windows Firewall is off for some networks", "there, usbipd's port 3240 is reachable without pairing", None);
@@ -433,48 +437,77 @@ fn add_plugin(punktfunk: &Path) -> Result<()> {
 // --- Uninstall ---------------------------------------------------------------------------------
 
 fn plan_uninstall(found: &Found, ctx: &Ctx) -> Result<Plan> {
-    anyhow::ensure!(found.relay.is_some() || found.host.is_some(), "Plugover is not installed here");
+    let (relay, host) = ctx.removing(found)?;
+    // Both roles share one plugover.exe; it goes only with the last of them.
+    let everything = relay == found.relay.is_some() && host == found.host.is_some();
     let mut lines = Vec::new();
-    for (role, v) in [("relay", &found.relay), ("host", &found.host)] {
-        if v.is_some() {
+    for (role, removed, there) in [("relay", relay, found.relay.is_some()), ("host", host, found.host.is_some())] {
+        if removed {
             lines.push(line(Mark::Todo, format!("Remove the {role}"), "its task and firewall rules"));
+        } else if there {
+            lines.push(line(Mark::Ok, format!("Keep the {role}"), "still installed"));
         }
     }
-    lines.push(line(Mark::Todo, "Remove plugover.exe", install_dir().display().to_string()));
+    if everything {
+        lines.push(line(Mark::Todo, "Remove plugover.exe", install_dir().display().to_string()));
+    }
     let purge = ctx.args.purge || (!ctx.args.yes && ctx.interactive && ctx.confirm("Also delete pairings and settings?", false)?);
     if purge {
         lines.push(line(Mark::Todo, "Delete pairings and settings", "you pair again after reinstalling"));
     }
-    let steps: Vec<(String, Action)> = vec![("Removing Plugover".into(), Box::new(move || remove(purge)))];
-    let after: Action = Box::new(|| {
-        println!("  {}", paint(GOOD.bold(), "Plugover is gone."));
+    let steps: Vec<(String, Action)> = vec![("Removing Plugover".into(), Box::new(move || remove(relay, host, everything, purge)))];
+    let after: Action = Box::new(move || {
+        let done = if everything { "Plugover is gone." } else if relay { "The relay is gone." } else { "The host is gone." };
+        println!("  {}", paint(GOOD.bold(), done));
         println!("  {}", paint(DIM, "usbipd-win and usbip-win2 stay installed; remove them in Settings > Apps if nothing else uses them."));
         Ok(())
     });
     Ok(Plan { lines, steps, root: true, after })
 }
 
-fn remove(purge: bool) -> Result<()> {
-    let mut script = format!(
-        "foreach ($t in {r}, {h}) {{
-             Stop-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
-             Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
-         }}
-         Get-Process plugover -ErrorAction SilentlyContinue | Where-Object Id -ne {me} | Stop-Process -Force
-         foreach ($n in 'Plugover (block usbipd)', 'Plugover (mDNS)', 'Plugover relay') {{
+/// Removes the relay, the host or both; `everything` when nothing of Plugover stays.
+fn remove(relay: bool, host: bool, everything: bool, purge: bool) -> Result<()> {
+    let mut script = String::new();
+    for (task, on) in [(RELAY_TASK, relay), (HOST_TASK, host)] {
+        if on {
+            script += &format!(
+                "Stop-ScheduledTask -TaskName {t} -ErrorAction SilentlyContinue
+                 Unregister-ScheduledTask -TaskName {t} -Confirm:$false -ErrorAction SilentlyContinue\n",
+                t = q(task)
+            );
+        }
+    }
+    if everything {
+        script += &format!("Get-Process plugover -ErrorAction SilentlyContinue | Where-Object Id -ne {} | Stop-Process -Force\n", std::process::id());
+    }
+    if relay {
+        // Setup turned usbipd's own rule off; leave usbipd-win as it was before Plugover.
+        script += "foreach ($n in 'Plugover (block usbipd)', 'Plugover (mDNS)', 'Plugover relay') {
              Remove-NetFirewallRule -DisplayName $n -ErrorAction SilentlyContinue
-         }}
-         $pf = (Get-Command punktfunk-host -ErrorAction SilentlyContinue).Source
-         if ($pf) {{ & $pf plugins remove punktfunk-plugin-plugover 2>&1 | Out-Null }}
-         Remove-Item (Join-Path $env:ProgramData 'punktfunk\\plugins\\vendor\\punktfunk-plugin-plugover-*.tgz') -ErrorAction SilentlyContinue\n",
-        r = q(RELAY_TASK),
-        h = q(HOST_TASK),
-        me = std::process::id(),
-    );
+         }
+         Get-NetFirewallRule -DisplayName 'usbipd' -ErrorAction SilentlyContinue | Enable-NetFirewallRule\n";
+    }
+    if host {
+        script += "$pf = (Get-Command punktfunk-host -ErrorAction SilentlyContinue).Source
+         if ($pf) { & $pf plugins remove punktfunk-plugin-plugover 2>&1 | Out-Null }
+         Remove-Item (Join-Path $env:ProgramData 'punktfunk\\plugins\\vendor\\punktfunk-plugin-plugover-*.tgz') -ErrorAction SilentlyContinue\n";
+    }
     if purge {
-        script += &format!("Remove-Item -Recurse -Force {} -ErrorAction SilentlyContinue\n", q(crate::program_data()));
+        let data = crate::program_data();
+        // The other role keeps its own files.
+        let gone = match (everything, relay) {
+            (true, _) => vec![data],
+            (false, true) => vec![crate::relay_state(), crate::state::PairingWindow::path(&crate::relay_state())],
+            (false, false) => vec![data.join("host.toml"), data.join("api")],
+        };
+        for path in gone {
+            script += &format!("Remove-Item -Recurse -Force {} -ErrorAction SilentlyContinue\n", q(path));
+        }
     }
     ps(&script)?;
+    if !everything {
+        return Ok(());
+    }
     // A running program cannot delete itself; setup run from Program Files leaves just its exe.
     for e in fs::read_dir(install_dir()).into_iter().flatten().flatten() {
         if !is_me(&e.path()) {

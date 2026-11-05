@@ -10,7 +10,21 @@ import { Spinner } from "@unom/ui/spinner";
 import { Toaster, toast } from "@unom/ui/toast";
 import { ChevronDown, ChevronLeft, Ellipsis, Monitor, Pause, Play, Plus, Unplug } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
-import { ApiError, type Device, type Found, type Kind, KIND_LABEL, type Missing, type Relay, SOURCE_LABEL, type Status, call } from "./api";
+import {
+	ApiError,
+	call,
+	type Device,
+	type Found,
+	type Kind,
+	KIND_LABEL,
+	type Latency,
+	type Missing,
+	newer,
+	type Relay,
+	SOURCE_LABEL,
+	type Status,
+	steady,
+} from "./api";
 import { KIND_ICON } from "./icons";
 
 const POLL_MS = 2000;
@@ -39,10 +53,19 @@ export function App() {
 		}
 	}, []);
 
+	// The next poll waits for the last answer, so a slow daemon is not sent a pile of requests.
 	useEffect(() => {
-		void refresh();
-		const timer = setInterval(refresh, POLL_MS);
-		return () => clearInterval(timer);
+		let stopped = false;
+		let timer: ReturnType<typeof setTimeout>;
+		const poll = async () => {
+			await refresh();
+			if (!stopped) timer = setTimeout(poll, POLL_MS);
+		};
+		void poll();
+		return () => {
+			stopped = true;
+			clearTimeout(timer);
+		};
 	}, [refresh]);
 
 	let content: React.ReactNode;
@@ -52,7 +75,7 @@ export function App() {
 				icon={Unplug}
 				variant="error"
 				title="Plugover host daemon is not running"
-				description="Run the Plugover installer on this computer and pick Host."
+				description="Run the Plugover installer on this computer and pick Host. If it is installed already, plugover doctor says why it is not running."
 			/>
 		);
 	} else if (error && !status) {
@@ -100,8 +123,10 @@ export function App() {
 /** What a stream does right now, the first thing to know on this page. */
 function StreamBanner({ status }: { status: Status }) {
 	const here = status.relays.flatMap((r) => r.devices.filter((d) => d.state === "here").map(() => r.name));
+	const failing = status.relays.flatMap((r) => r.devices.filter((d) => d.error)).length;
 	const from = [...new Set(here)];
-	const devices = `${here.length} ${here.length === 1 ? "device" : "devices"}`;
+	const count = (n: number) => `${n} ${n === 1 ? "device" : "devices"}`;
+	const devices = count(here.length);
 	const Icon = status.session ? Play : Pause;
 	return (
 		<Card muted colorVariant={status.session ? "accent" : "default"} className="flex-row items-center gap-4">
@@ -114,9 +139,10 @@ function StreamBanner({ status }: { status: Status }) {
 							? `${devices} connected from ${from.join(", ")}`
 							: "No devices connected"
 						: here.length > 0
-						  ? `${devices} connected by hand`
-						  : "Devices you turn on connect when a stream starts."}
+							? `${devices} connected outside a stream`
+							: "Devices you turn on connect when a stream starts."}
 				</p>
+				{failing > 0 && <p className="text-sm text-destructive">{count(failing)} could not connect; see below.</p>}
 			</div>
 			<p className="hidden text-sm text-muted-foreground sm:block">
 				{status.host}
@@ -250,7 +276,9 @@ function CodeEntry({
 			<BackLink onClick={onCancel} />
 			<header>
 				<h1 className="text-2xl font-semibold tracking-tight">Pair with {name}</h1>
-				<p className="mt-1 max-w-prose text-muted-foreground">Enter the six-digit code shown at the end of the relay install.</p>
+				<p className="mt-1 max-w-prose text-muted-foreground">
+					Enter the six-digit code from the relay. Its install prints one at the end.
+				</p>
 			</header>
 			<Card className="gap-4">
 				<form onSubmit={submit} className="flex flex-wrap items-center gap-3">
@@ -309,7 +337,11 @@ function RelayView({
 	const devices = relay.devices.filter((d) => !d.blocked).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.title.localeCompare(b.title));
 	const missing = relay.missing ?? [];
 	const unpaired = relay.error?.includes("pair again") ?? false;
-	const mismatch = relay.online && hostVersion && relay.version !== hostVersion;
+	// A relay too old to encrypt gets its own card, which says to update it too.
+	const mismatch = relay.online && relay.encrypted && hostVersion && relay.version !== hostVersion;
+	// Which side to update: the relay before 0.5 does not say its version, so it is the old one.
+	const relayOlder = !relay.version || (hostVersion !== undefined && newer(hostVersion, relay.version));
+	const slow = relay.online && relay.latency && !steady(relay.latency);
 	const [repairing, setRepairing] = useState(false);
 	const [menu, setMenu] = useState(false);
 	// Several of the same model: rows say which port is which.
@@ -333,10 +365,24 @@ function RelayView({
 						aria-hidden
 					/>
 					<div className="min-w-0 flex-1">
-						<h2 className="truncate text-lg font-medium">{relay.name}</h2>
+						<h2 className="flex items-center gap-2 text-lg font-medium">
+							<span className="truncate">{relay.name}</span>
+							{relay.unencrypted && (
+								<Badge size="sm" variant="warn">
+									Not encrypted
+								</Badge>
+							)}
+						</h2>
 						<p className="truncate text-sm text-muted-foreground">
-							{relay.online ? "Online" : unpaired ? "Unpaired" : "Offline"} · {relay.address}
+							{relay.online ? "Online" : unpaired ? "Unpaired" : "Offline"}
+							{relay.online && relay.latency && (
+								<span className={cn(slow && "text-warn")} title="Round trip to the relay over the last few seconds">
+									{` · ${ms(relay.latency.average)}`}
+								</span>
+							)}
+							{` · ${relay.address}`}
 							{relay.version && ` · Plugover ${relay.version}`}
+							{relay.encrypted && " · Encrypted"}
 						</p>
 					</div>
 					<Button size="icon" variant="ghost" aria-label={`Options for ${relay.name}`} aria-expanded={menu} onClick={() => setMenu((m) => !m)}>
@@ -344,7 +390,10 @@ function RelayView({
 					</Button>
 				</header>
 				{menu && (
-					<div className="flex flex-wrap items-center justify-end gap-2 text-sm text-muted-foreground">
+					<div
+						className="flex flex-wrap items-center justify-end gap-2 text-sm text-muted-foreground"
+						onKeyDown={(e) => e.key === "Escape" && setMenu(false)}
+					>
 						<Button size="sm" variant="ghost" onClick={() => setRepairing(true)}>
 							Pair again
 						</Button>
@@ -378,13 +427,29 @@ function RelayView({
 			)}
 
 			{mismatch && (
-				<Card muted>
-					<p className="text-sm text-muted-foreground">
-						{relay.name} runs Plugover {relay.version ?? "older than 0.5"} and this computer {hostVersion}. Install the
-						same version on both.
+				<Card muted className="border border-warn/50">
+					<p className="text-sm">
+						{relay.name} runs Plugover {relay.version ?? "older than 0.5"} and this computer {hostVersion}.{" "}
+						{relayOlder ? (
+							relay.version ? (
+								<>
+									Run <Cmd>plugover update</Cmd> on {relay.name}.
+								</>
+							) : (
+								`Run the installer on ${relay.name} again.`
+							)
+						) : (
+							<>
+								Run <Cmd>plugover update</Cmd> on this computer.
+							</>
+						)}
 					</p>
 				</Card>
 			)}
+
+			{relay.online && !relay.encrypted && <Unencrypted relay={relay} refresh={refresh} />}
+
+			{slow && relay.latency && <SlowLink relay={relay.name} latency={relay.latency} />}
 
 			<div className="flex flex-col gap-2">
 				<Card padding={false}>
@@ -403,6 +468,87 @@ function RelayView({
 			</div>
 		</section>
 	);
+}
+
+/** A relay too old to encrypt: its devices stay off until it is updated, or you allow it. */
+function Unencrypted({ relay, refresh }: { relay: Relay; refresh: () => Promise<void> }) {
+	const [confirming, setConfirming] = useState(false);
+	const [busy, setBusy] = useState(false);
+	const set = async (on: boolean) => {
+		setBusy(true);
+		await act(
+			"unencrypted",
+			{ relay: relay.id, on },
+			on ? `${relay.name} connects without encryption` : `${relay.name} connects only encrypted`,
+			refresh,
+		);
+		setBusy(false);
+		setConfirming(false);
+	};
+	const version = relay.version ?? "older than 0.5";
+	const risk = "anyone on your network could watch these devices or fake their input, such as keystrokes";
+	if (relay.unencrypted) {
+		return (
+			<Card muted className="border border-warn/50">
+				<p className="text-sm">
+					{relay.name} runs Plugover {version}, which cannot encrypt, and you allowed it to connect anyway: {risk}. Update
+					Plugover on {relay.name} to encrypt again.
+				</p>
+				<Button className="mt-3 self-start" size="sm" variant="secondary" disabled={busy} onClick={() => set(false)}>
+					Stop connecting without encryption
+				</Button>
+			</Card>
+		);
+	}
+	return (
+		<Card muted className="border border-destructive/50">
+			<p className="font-medium">{relay.name} cannot encrypt, so its devices do not connect.</p>
+			<p className="mt-1 max-w-prose text-sm text-muted-foreground">
+				It runs Plugover {version}. Run <Cmd>plugover update</Cmd> on {relay.name}, or connect without encryption until you
+				do.
+			</p>
+			{confirming ? (
+				<div role="alert" className="mt-3 flex flex-col gap-3">
+					<p className="max-w-prose text-sm">Without encryption, {risk}. Do this only on a network you trust.</p>
+					<div className="flex flex-wrap gap-2">
+						<Button size="sm" variant="destructive" disabled={busy} onClick={() => set(true)}>
+							Connect without encryption
+						</Button>
+						<Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+							Cancel
+						</Button>
+					</div>
+				</div>
+			) : (
+				<Button className="mt-3 self-start" size="sm" variant="secondary" onClick={() => setConfirming(true)}>
+					Connect without encryption…
+				</Button>
+			)}
+		</Card>
+	);
+}
+
+/** Force feedback needs a quick and steady link, and a wobbly one is the usual cause of trouble. */
+function SlowLink({ relay, latency }: { relay: string; latency: Latency }) {
+	return (
+		<Card muted className="border border-warn/50">
+			<p className="text-sm">
+				The network to {relay} is slow or uneven: {ms(latency.average)} on average, varying by {ms(latency.jitter)}. Force
+				feedback needs a steady link; connecting both computers by cable usually fixes it.
+			</p>
+		</Card>
+	);
+}
+
+/** Unix seconds as a time of day, with the date when it was not today. */
+function clock(unix: number) {
+	const at = new Date(unix * 1000);
+	const time = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+	return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString()} ${time}`;
+}
+
+function ms(n: number) {
+	return `${n < 10 ? n.toFixed(1) : Math.round(n)} ms`;
 }
 
 function Cmd({ children }: { children: React.ReactNode }) {
@@ -427,41 +573,46 @@ function DeviceRow({
 	refresh,
 }: { relay: Relay; device: Device; twins: boolean; session: boolean; refresh: () => Promise<void> }) {
 	const [open, setOpen] = useState(false);
-	const [busy, setBusy] = useState(false);
+	/** What the switch is doing right now, which can take a few seconds during a stream. */
+	const [busy, setBusy] = useState<string>();
 	const here = d.state === "here";
-	const run = async (op: string, body: object, done: string) => {
-		setBusy(true);
+	const run = async (op: string, body: object, done: string, doing: string) => {
+		setBusy(doing);
 		await act(op, { relay: relay.id, ...body }, done, refresh);
-		setBusy(false);
+		setBusy(undefined);
 	};
 	const note =
-		d.state === "elsewhere" ? `In use by ${d.lent_to}` : d.auto && !here && !session ? "Connects when a stream starts" : undefined;
+		busy ??
+		(d.state === "elsewhere" ? `In use by ${d.lent_to}` : d.auto && !here && !session ? "Connects when a stream starts" : undefined);
 
 	return (
 		<div className="border-b border-border last:border-0">
 			<div className="flex items-center gap-4 p-4">
 				<KindTile device={d} />
 				<div className="min-w-0 flex-1">
-					<p className="truncate font-medium">{d.title}</p>
-					<div className="mt-0.5 flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
-						<span className="truncate">
+					<p className="font-medium [overflow-wrap:anywhere]">{d.title}</p>
+					{/* Wraps rather than cuts off on a phone: the note is what the row is there to say. */}
+					<div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+						<span>
 							{KIND_LABEL[d.kind]}
 							{(twins || d.auto_port) && ` · port ${d.busid}${d.auto_port ? " only" : ""}`}
 							{note && ` · ${note}`}
 						</span>
 						{here && <Badge size="sm">Connected</Badge>}
 					</div>
+					{d.error && !busy && <p className="mt-1 break-words text-sm text-destructive">Could not connect: {d.error}</p>}
 				</div>
 				<Switch
 					className={OFF_RING}
 					checked={d.auto}
-					disabled={busy}
+					disabled={busy !== undefined}
 					aria-label={`Use ${d.title} here during streams`}
 					onCheckedChange={(on) =>
 						run(
 							"auto",
 							{ device: d.id, on },
 							on ? (session ? `${d.title} connected` : `${d.title} connects when a stream starts`) : `${d.title} is free again`,
+							on ? (session ? "Connecting…" : "Saving…") : here ? "Releasing…" : "Saving…",
 						)
 					}
 				/>
@@ -479,6 +630,24 @@ function DeviceRow({
 					<dd className="font-mono">{d.busid}</dd>
 					<dt className="text-muted-foreground">Name from</dt>
 					<dd>{SOURCE_LABEL[d.source]}</dd>
+					{d.history.drops > 0 && (
+						<>
+							<dt className="text-muted-foreground">Dropped out</dt>
+							<dd>
+								{d.history.drops === 1 ? "Once" : `${d.history.drops} times`}
+								{d.history.last_drop && `, last at ${clock(d.history.last_drop)}`}
+							</dd>
+						</>
+					)}
+					{d.history.last_error && (
+						<>
+							<dt className="text-muted-foreground">Last error</dt>
+							<dd className="break-words">
+								{d.history.last_error_at && `${clock(d.history.last_error_at)}: `}
+								{d.history.last_error}
+							</dd>
+						</>
+					)}
 					{d.auto && (twins || d.auto_port) && (
 						<>
 							<dt className="text-muted-foreground">Only this port</dt>
@@ -486,13 +655,14 @@ function DeviceRow({
 								<Switch
 									className={OFF_RING}
 									checked={d.auto_port}
-									disabled={busy}
+									disabled={busy !== undefined}
 									aria-label={`Auto-connect only the ${d.title} on port ${d.busid}`}
 									onCheckedChange={(only) =>
 										run(
 											"auto",
 											{ device: d.id, on: true, port: only ? d.busid : undefined },
 											only ? `Only the ${d.title} on port ${d.busid} connects` : `Any ${d.title} connects`,
+											"Saving…",
 										)
 									}
 								/>
@@ -531,11 +701,11 @@ function LabelForm({ device: d, refresh }: { device: Device; refresh: () => Prom
 				onChange={(e) => setName(e.target.value)}
 				placeholder={d.title}
 				maxLength={60}
-				aria-label={`Name for ${d.id}`}
+				aria-label={`Name for ${d.title}`}
 				className="w-56"
 			/>
 			<Select value={kind} onValueChange={(k) => setKind(k as Kind)}>
-				<SelectTrigger size="sm" aria-label={`Kind of ${d.id}`} className="w-44">
+				<SelectTrigger size="sm" aria-label={`Kind of ${d.title}`} className="w-44">
 					<SelectValue />
 				</SelectTrigger>
 				<SelectContent>
@@ -569,12 +739,12 @@ function MissingRow({ relay, device: m, refresh }: { relay: Relay; device: Missi
 		<div className="flex items-center gap-4 border-b border-border p-4 last:border-0">
 			<KindTile />
 			<div className="min-w-0 flex-1">
-				<p className="truncate font-medium text-muted-foreground">{m.title}</p>
-				<p className="mt-0.5 truncate text-sm text-muted-foreground">
+				<p className="font-medium text-muted-foreground [overflow-wrap:anywhere]">{m.title}</p>
+				<p className="mt-0.5 text-sm text-muted-foreground">
 					{relay.online ? `Not plugged into ${relay.name}${m.port ? ` at port ${m.port}` : ""}` : "Waiting for the relay"}
 				</p>
 			</div>
-			<Switch checked disabled={busy} aria-label={`Stop using ${m.title}`} onCheckedChange={off} />
+			<Switch checked disabled={busy} aria-label={`Use ${m.title} here during streams`} onCheckedChange={off} />
 			{/* Where the details button sits in the other rows. */}
 			<div className="size-9 shrink-0" />
 		</div>
@@ -591,8 +761,8 @@ function ForgetButton({ relay, refresh }: { relay: Relay; refresh: () => Promise
 		);
 	}
 	return (
-		<span className="flex items-center gap-2">
-			Forget {relay.name}? You will need to pair again.
+		<span role="alert" className="flex flex-wrap items-center justify-end gap-2">
+			Forget {relay.name}? Its devices and your choices for them go until you pair again.
 			<Button size="sm" variant="destructive" onClick={() => act("forget", { relay: relay.id }, `Removed ${relay.name}`, refresh)}>
 				Forget
 			</Button>

@@ -33,12 +33,6 @@ maker = "Logitech"
 kind = "wheel"
 
 [[device]]
-id = "046d:c215"
-name = "Extreme 3D Pro"
-maker = "Logitech"
-kind = "joystick"
-
-[[device]]
 id = "044f:b66e"
 name = "T300RS"
 maker = "Thrustmaster"
@@ -55,6 +49,78 @@ id = "044f:b67f"
 name = "TMX"
 maker = "Thrustmaster"
 kind = "wheel"
+
+[[device]]
+id = "046d:c260"
+name = "G29 Driving Force (PlayStation 4 mode)"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:c294"
+name = "Driving Force (compatibility mode)"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:c295"
+name = "MOMO Force"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:c298"
+name = "Driving Force Pro"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:c29c"
+name = "Speed Force Wireless"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:ca03"
+name = "MOMO Racing"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "046d:ca04"
+name = "Formula Vibration Feedback Wheel"
+maker = "Logitech"
+kind = "wheel"
+
+[[device]]
+id = "044f:b678"
+name = "T.Flight Rudder Pedals"
+maker = "Thrustmaster"
+kind = "pedals"
+
+[[device]]
+id = "044f:b679"
+name = "T-Rudder"
+maker = "Thrustmaster"
+kind = "pedals"
+
+[[device]]
+id = "06a3:0763"
+name = "Pro Flight Rudder Pedals"
+maker = "Saitek"
+kind = "pedals"
+
+[[device]]
+id = "06a3:0764"
+name = "Pro Flight Combat Rudder Pedals"
+maker = "Saitek"
+kind = "pedals"
+
+[[device]]
+id = "046d:c215"
+name = "Extreme 3D Pro"
+maker = "Logitech"
+kind = "joystick"
 
 [[device]]
 id = "044f:b108"
@@ -78,6 +144,54 @@ kind = "joystick"
 id = "06a3:0762"
 name = "X52 Pro Flight Control System"
 maker = "Saitek"
+kind = "joystick"
+
+[[device]]
+id = "046d:c287"
+name = "G940 Flight System"
+maker = "Logitech"
+kind = "joystick"
+
+[[device]]
+id = "044f:0402"
+name = "HOTAS Warthog Joystick"
+maker = "Thrustmaster"
+kind = "joystick"
+
+[[device]]
+id = "044f:0404"
+name = "HOTAS Warthog Throttle"
+maker = "Thrustmaster"
+kind = "joystick"
+
+[[device]]
+id = "044f:b687"
+name = "TWCS Throttle"
+maker = "Thrustmaster"
+kind = "joystick"
+
+[[device]]
+id = "06a3:0bac"
+name = "Pro Flight Yoke"
+maker = "Saitek"
+kind = "joystick"
+
+[[device]]
+id = "06a3:0c2d"
+name = "Pro Flight Throttle Quadrant"
+maker = "Saitek"
+kind = "joystick"
+
+[[device]]
+id = "0738:2215"
+name = "X-55 Rhino Stick"
+maker = "Mad Catz"
+kind = "joystick"
+
+[[device]]
+id = "0738:a215"
+name = "X-55 Rhino Throttle"
+maker = "Mad Catz"
 kind = "joystick"
 
 [[device]]
@@ -150,4 +264,82 @@ kind = "gamepad"
 id = "28de:1205"
 name = "Steam Deck Controller"
 maker = "Valve"
+kind = "gamepad"
+
+[[device]]
+id = "046d:c216"
+name = "F310 Gamepad (DirectInput)"
+maker = "Logitech"
+kind = "gamepad"
+
+[[device]]
+id = "046d:c21d"
+name = "F310 Gamepad"
+maker = "Logitech"
+kind = "gamepad"
+
+[[device]]
+id = "046d:c218"
+name = "F510 Gamepad (DirectInput)"
+maker = "Logitech"
+kind = "gamepad"
+
+[[device]]
+id = "046d:c21e"
+name = "F510 Gamepad"
+maker = "Logitech"
+kind = "gamepad"
+
+[[device]]
+id = "046d:c219"
+name = "F710 Gamepad (DirectInput)"
+maker = "Logitech"
+kind = "gamepad"
+
+[[device]]
+id = "046d:c21f"
+name = "F710 Gamepad"
+maker = "Logitech"
+kind = "gamepad"
+
+[[device]]
+id = "045e:02e3"
+name = "Xbox Elite Controller"
+maker = "Microsoft"
+kind = "gamepad"
+
+[[device]]
+id = "045e:0b00"
+name = "Xbox Elite Series 2 Controller"
+maker = "Microsoft"
+kind = "gamepad"
+
+[[device]]
+id = "045e:028f"
+name = "Xbox 360 Wireless Controller (cable)"
+maker = "Microsoft"
+kind = "gamepad"
+
+[[device]]
+id = "045e:02e6"
+name = "Xbox Wireless Adapter"
+maker = "Microsoft"
+kind = "gamepad"
+
+[[device]]
+id = "045e:02fe"
+name = "Xbox Wireless Adapter"
+maker = "Microsoft"
+kind = "gamepad"
+
+[[device]]
+id = "054c:0268"
+name = "DualShock 3"
+maker = "Sony"
+kind = "gamepad"
+
+[[device]]
+id = "054c:0ba0"
+name = "DualShock 4 Wireless Adapter"
+maker = "Sony"
 kind = "gamepad"

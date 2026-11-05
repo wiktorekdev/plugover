@@ -89,7 +89,7 @@ pub fn print_status(st: &Status) {
         if st.session { paint(GOOD, "● stream running") } else { paint(DIM, "○ no stream") }
     );
     if st.relays.is_empty() {
-        println!("\nNo relay paired yet. Run {} here, or open USB devices in the punktfunk console.", cmd("plugover pair"));
+        println!("\nNo relay paired yet. Run {} here, or open Plugover in the punktfunk console.", cmd("plugover pair"));
     }
     for r in &st.relays {
         print_relay(r, &st.version);
@@ -101,13 +101,34 @@ pub fn print_status(st: &Status) {
 }
 
 fn print_relay(r: &RelayStatus, ours: &str) {
+    let latency = r.latency.map(|l| paint(if l.good() { DIM } else { WARN }, format!("  {:.1} ms", l.average))).unwrap_or_default();
     println!(
-        "\n{}  {}  {}{}",
+        "\n{}  {}  {}{}{latency}{}",
         paint(BOLD, &r.name),
         if r.online { paint(GOOD, "● online") } else { paint(BAD, "● offline") },
         paint(DIM, &r.address),
-        r.version.as_ref().map(|v| paint(DIM, format!("  v{v}"))).unwrap_or_default()
+        r.version.as_ref().map(|v| paint(DIM, format!("  v{v}"))).unwrap_or_default(),
+        if r.encrypted { paint(DIM, "  encrypted") } else { String::new() }
     );
+    if r.unencrypted {
+        println!("  {} not encrypted: anyone on your network could watch its devices or fake their input", paint(WARN, "!"));
+        println!("    {} update Plugover on {} to encrypt, or stop with {}", paint(DIM, "→"), r.name, cmd(&format!("plugover unencrypted {} off", r.name)));
+    } else if r.online && !r.encrypted {
+        println!("  {} {} cannot encrypt, so its devices do not connect", paint(BAD, "✗"), r.name);
+        println!(
+            "    {} update Plugover on it, or connect without encryption: {}",
+            paint(DIM, "→"),
+            cmd(&format!("plugover unencrypted {} on", r.name))
+        );
+    }
+    if let Some(l) = r.latency.filter(|l| !l.good()) {
+        println!(
+            "  {} the link is slow or uneven ({:.1} ms, varies by {:.1} ms); force feedback needs a steady one, so wire both machines if you can",
+            paint(WARN, "!"),
+            l.average,
+            l.jitter
+        );
+    }
     if !r.online {
         let why = r.error.as_deref().unwrap_or("no answer yet");
         println!("  {} {why}", paint(BAD, "✗"));
@@ -118,9 +139,13 @@ fn print_relay(r: &RelayStatus, ours: &str) {
             println!("    {} run {} on {} to see why", paint(DIM, "→"), cmd("plugover doctor"), r.name);
         }
     } else if !ours.is_empty() && r.version.as_deref() != Some(ours) {
-        let theirs = r.version.as_deref().unwrap_or("older than 0.5");
-        let how = if r.version.is_some() { cmd("plugover update") } else { "run the installer there".into() };
-        println!("  {} {} runs Plugover {theirs}; update it to {ours} too ({how})", paint(WARN, "!"), r.name);
+        match r.version.as_deref() {
+            Some(theirs) if crate::setup::newer(theirs, ours) => {
+                println!("  {} {} runs Plugover {theirs}; update this computer too ({})", paint(WARN, "!"), r.name, cmd("plugover update"));
+            }
+            Some(theirs) => println!("  {} {} runs Plugover {theirs}; update it to {ours} too ({})", paint(WARN, "!"), r.name, cmd("plugover update")),
+            None => println!("  {} {} runs Plugover older than 0.5; update it to {ours} too (run the installer there)", paint(WARN, "!"), r.name),
+        }
     }
     let (shown, hidden): (Vec<&DeviceStatus>, Vec<&DeviceStatus>) = r.devices.iter().partition(|d| d.info.identity.blocked.is_none());
     let titles: Vec<String> = shown.iter().map(|d| short(&d.info.identity.title)).chain(r.missing.iter().map(|m| short(&m.title))).collect();
@@ -133,11 +158,19 @@ fn print_relay(r: &RelayStatus, ours: &str) {
             DeviceState::Free => (paint(DIM, "○"), paint(DIM, "free")),
         };
         let auto = match (d.auto, d.auto_port) {
-            (true, true) => paint(ACCENT, "  auto, this port"),
-            (true, false) => paint(ACCENT, "  auto"),
+            (true, true) => paint(ACCENT, "  connects with streams, this port only"),
+            (true, false) => paint(ACCENT, "  connects with streams"),
             _ => String::new(),
         };
-        println!("  {dot} {}  {}  {}  {state}{auto}", cell(BOLD, title, wt), cell(DIM, &d.info.busid, wb), cell(ACCENT, &d.info.id, 9));
+        let drops = match d.history.drops {
+            0 => String::new(),
+            1 => paint(WARN, "  dropped out once"),
+            n => paint(WARN, format!("  dropped out {n} times")),
+        };
+        println!("  {dot} {}  {}  {}  {state}{auto}{drops}", cell(BOLD, title, wt), cell(DIM, &d.info.busid, wb), cell(ACCENT, &d.info.id, 9));
+        if let Some(why) = &d.error {
+            println!("    {} could not connect: {why}", paint(BAD, "✗"));
+        }
     }
     for (m, title) in r.missing.iter().zip(&titles[shown.len()..]) {
         println!(
@@ -146,7 +179,7 @@ fn print_relay(r: &RelayStatus, ours: &str) {
             cell(DIM, title, wt),
             cell(DIM, m.port.as_deref().unwrap_or_default(), wb),
             cell(ACCENT, &m.id, 9),
-            paint(DIM, if r.online { "not plugged in  auto" } else { "auto" })
+            paint(DIM, if r.online { "not plugged in  connects with streams" } else { "connects with streams" })
         );
     }
     if r.online && shown.is_empty() && r.missing.is_empty() {

@@ -9,6 +9,8 @@ import { join } from "node:path";
 
 const WINDOWS = process.platform === "win32";
 const WINDOWS_PORT = 7276;
+/** Longest a request may take: a pairing or a slow attach is a few seconds. */
+const TIMEOUT_MS = 30_000;
 const PROGRAM_DATA = join(process.env.ProgramData ?? "C:\\ProgramData", "Plugover");
 const SOCKET = join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local/state"), "plugover", "host.sock");
 
@@ -33,12 +35,17 @@ export function daemon(req: Record<string, unknown>): Promise<Reply> {
 		}
 		const s = connect(t.opts);
 		let buf = "";
+		let answered = false;
 		s.setEncoding("utf8");
+		// Pairing and plugging in wait on the network, but never this long; a page waiting forever
+		// on a stuck daemon would look like it is still loading.
+		s.setTimeout(TIMEOUT_MS, () => s.destroy(new Error("it did not answer in time")));
 		s.on("connect", () => s.write(`${JSON.stringify(t.token ? { ...req, token: t.token } : req)}\n`));
 		s.on("data", (chunk) => {
 			buf += chunk;
 			const end = buf.indexOf("\n");
 			if (end < 0) return;
+			answered = true;
 			s.end();
 			try {
 				resolve(JSON.parse(buf.slice(0, end)) as Reply);
@@ -47,5 +54,6 @@ export function daemon(req: Record<string, unknown>): Promise<Reply> {
 			}
 		});
 		s.on("error", (e) => reject(new Error(`the Plugover daemon is not running (${e.message})`)));
+		s.on("close", () => answered || reject(new Error("the Plugover daemon hung up without answering")));
 	});
 }

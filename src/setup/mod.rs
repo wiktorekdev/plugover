@@ -37,19 +37,20 @@ use std::{
 
 #[derive(clap::Args, Clone, Default)]
 pub struct Args {
-    /// Install the host (punktfunk runs here).
-    #[arg(long, conflicts_with_all = ["relay", "uninstall"])]
+    /// Install the host (punktfunk runs here); with --uninstall, remove only the host.
+    #[arg(long, conflicts_with = "relay")]
     pub host: bool,
-    /// Install the relay (the devices are plugged in here).
-    #[arg(long, conflicts_with = "uninstall")]
+    /// Install the relay (the devices are plugged in here); with --uninstall, remove only the relay.
+    #[arg(long)]
     pub relay: bool,
-    /// Remove Plugover from this computer.
+    /// Remove Plugover from this computer: every role installed, or the one --relay or --host names.
     #[arg(long)]
     pub uninstall: bool,
     /// With --uninstall, also delete pairings and settings.
     #[arg(long, requires = "uninstall")]
     pub purge: bool,
-    /// Network the relay's firewall lets hosts in from, such as 192.168.1.0/24.
+    /// Networks the relay's firewall lets hosts in from, such as 192.168.1.0/24, or several
+    /// separated by commas.
     #[arg(long, value_name = "CIDR")]
     pub lan: Option<String>,
     /// Do not ask for confirmation.
@@ -109,6 +110,17 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// The roles `--uninstall` removes, as (relay, host): the one --relay or --host names, or
+    /// every installed one.
+    pub fn removing(&self, found: &Found) -> Result<(bool, bool)> {
+        let a = &self.args;
+        let only = a.relay || a.host;
+        anyhow::ensure!(found.relay.is_some() || found.host.is_some(), "Plugover is not installed here");
+        anyhow::ensure!(!a.relay || found.relay.is_some(), "the relay is not installed here");
+        anyhow::ensure!(!a.host || found.host.is_some(), "the host is not installed here");
+        Ok((found.relay.is_some() && (!only || a.relay), found.host.is_some() && (!only || a.host)))
+    }
+
     pub fn confirm(&self, question: &str, default: bool) -> Result<bool> {
         if self.args.yes {
             return Ok(true);
@@ -173,9 +185,9 @@ fn setup(args: Args) -> Result<()> {
     print_lines(&found.lines);
 
     let role = match (ctx.args.host, ctx.args.relay, ctx.args.uninstall) {
+        (_, _, true) => Role::Uninstall,
         (true, _, _) => Role::Host,
         (_, true, _) => Role::Relay,
-        (_, _, true) => Role::Uninstall,
         _ if !ctx.interactive => bail!("no terminal to ask on; pass --host, --relay or --uninstall"),
         _ => match choose(&found)? {
             Some(r) => r,
@@ -261,9 +273,11 @@ pub fn report(endpoint: &Path, host_config: &Path, relay_state: &Path) {
 
 const RELEASES: &str = "https://api.github.com/repos/wiktorekdev/plugover/releases/latest";
 const DOWNLOADS: &str = "https://github.com/wiktorekdev/plugover/releases/download";
+/// Signs every release's SHA256SUMS (scripts/build.sh); the same key as packaging/release-key.pem.
+const RELEASE_KEY: &str = "36f00a35e08acd30f5b87010dfa33c62c9e4b4e8318f5a332e5c4b515ba7cb72";
 
 /// "0.10.1" > "0.9.3", compared as numbers.
-fn newer(a: &str, b: &str) -> bool {
+pub fn newer(a: &str, b: &str) -> bool {
     let parse = |v: &str| v.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
     parse(a) > parse(b)
 }
@@ -303,12 +317,20 @@ pub fn update(check_only: bool, yes: bool) -> Result<()> {
         return Ok(());
     }
 
-    let dir = std::env::temp_dir().join(format!("plugover-{latest}"));
-    fs::create_dir_all(&dir)?;
-    let (file, sums) = (dir.join(asset(&latest)), dir.join("SHA256SUMS"));
-    for (url, path) in [(format!("{DOWNLOADS}/v{latest}/{}", asset(&latest)), &file), (format!("{DOWNLOADS}/v{latest}/SHA256SUMS"), &sums)] {
+    // A fresh directory only we can write: the file is checked here, then runs as root.
+    let dir = std::env::temp_dir().join(format!("plugover-{latest}-{}", hex::encode(crate::auth::random::<6>())));
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let (file, sums, sig) = (dir.join(asset(&latest)), dir.join("SHA256SUMS"), dir.join("SHA256SUMS.sig"));
+    for (name, path) in [(asset(&latest), &file), ("SHA256SUMS".into(), &sums), ("SHA256SUMS.sig".into(), &sig)] {
+        let url = format!("{DOWNLOADS}/v{latest}/{name}");
         exec(Command::new(curl()).args(["-fsSL", "-o"]).arg(path).arg(&url)).with_context(|| format!("downloading {url}"))?;
     }
+    // Whoever could swap the file on GitHub could swap the checksums too, but not sign them.
+    check_signature(&fs::read(&sums)?, &fs::read(&sig)?)?;
     let want = fs::read_to_string(&sums)?
         .lines()
         .find_map(|l| l.strip_suffix(&asset(&latest)).map(|h| h.trim().to_string()))
@@ -316,7 +338,7 @@ pub fn update(check_only: bool, yes: bool) -> Result<()> {
     check_sha256(&file, &want)?;
     #[cfg(unix)]
     fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
-    ok(&format!("Downloaded Plugover {latest}"), "checksum matches");
+    ok(&format!("Downloaded Plugover {latest}"), "signed, checksum matches");
 
     // The new binary installs itself, the same way the installer would.
     for (installed, flag) in [(relay, "--relay"), (host, "--host")] {
@@ -325,7 +347,22 @@ pub fn update(check_only: bool, yes: bool) -> Result<()> {
             anyhow::ensure!(status.success(), "setup {flag} of {latest} failed; see above");
         }
     }
+    // On Windows setup may still be running from it in an elevated window.
+    #[cfg(unix)]
+    let _ = fs::remove_dir_all(&dir);
     Ok(())
+}
+
+/// IPv4 networks such as `192.168.1.0/24, 10.0.0.0/24`, checked before they reach a firewall.
+pub fn networks(input: &str) -> Result<Vec<String>> {
+    let list: Vec<String> = input.split([',', ' ']).filter(|n| !n.is_empty()).map(str::to_string).collect();
+    anyhow::ensure!(!list.is_empty(), "name at least one network, such as 192.168.1.0/24");
+    for n in &list {
+        let (addr, bits) = n.split_once('/').unwrap_or((n, "32"));
+        let ok = addr.parse::<std::net::Ipv4Addr>().is_ok() && bits.parse::<u8>().is_ok_and(|b| b <= 32);
+        anyhow::ensure!(ok, "{n} is not an IPv4 network; they look like 192.168.1.0/24");
+    }
+    Ok(list)
 }
 
 // --- Terminal --------------------------------------------------------------------------------
@@ -583,6 +620,15 @@ pub fn is_me(path: &Path) -> bool {
     me.is_some() && fs::canonicalize(path).ok() == me
 }
 
+/// Checks that a release's SHA256SUMS was signed with Plugover's release key.
+fn check_signature(sums: &[u8], sig: &[u8]) -> Result<()> {
+    use ed25519_dalek::{Signature, VerifyingKey};
+    let key: [u8; 32] = hex::decode(RELEASE_KEY)?.try_into().expect("32 bytes");
+    let key = VerifyingKey::from_bytes(&key).expect("a valid release key");
+    let sig = Signature::from_slice(sig).map_err(|_| anyhow::anyhow!("the release's signature is malformed"))?;
+    key.verify_strict(sums, &sig).map_err(|_| anyhow::anyhow!("the release is not signed with Plugover's key; nothing was installed"))
+}
+
 /// Checks a downloaded file against its pinned SHA-256.
 pub fn check_sha256(path: &Path, want: &str) -> Result<()> {
     use sha2::{Digest, Sha256};
@@ -606,4 +652,48 @@ pub fn next_steps_host() {
         .is_ok_and(|v| v["relays"].as_array().is_some_and(|r| !r.is_empty()));
     let what = if paired { "to pick the devices that connect when you stream" } else { "and pair with your relay" };
     println!("\n  {} open the punktfunk console, go to {} {what}.", paint(DIM, "Next:"), paint(BOLD, "Plugover"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn releases_must_be_signed_with_the_release_key() {
+        let sums = b"abc  plugover-9.9.9-linux-x86_64\n";
+        // Made with: openssl pkeyutl -sign -inkey <release key> -rawin -in <sums>
+        let sig = hex::decode(
+            "a39fd7a6f819be4d94eae718f194786cdf2854fa5643ca4fa19b59948021a5ffb39656562689a5b4a0935c658ffb6dd362f022c0c216cdc303a99fb37cbfa903",
+        )
+        .unwrap();
+        check_signature(sums, &sig).unwrap();
+        assert!(check_signature(b"abd  plugover-9.9.9-linux-x86_64\n", &sig).is_err(), "changed checksums");
+        assert!(check_signature(sums, &sig[1..]).is_err());
+    }
+
+    #[test]
+    fn networks_are_checked() {
+        assert_eq!(networks("192.168.1.0/24, 10.0.0.0/8").unwrap(), ["192.168.1.0/24", "10.0.0.0/8"]);
+        assert_eq!(networks("192.168.1.50").unwrap(), ["192.168.1.50"]);
+        assert!(networks("192.168.1.0/33").is_err());
+        assert!(networks("lan; rm -rf /").is_err());
+        assert!(networks(" ").is_err());
+    }
+
+    #[test]
+    fn uninstall_removes_the_named_role_or_all() {
+        let found = |relay: bool, host: bool| Found {
+            lines: Vec::new(),
+            punktfunk: false,
+            relay: relay.then(|| "0.5.1".into()),
+            host: host.then(|| "0.5.1".into()),
+        };
+        let ctx = |relay: bool, host: bool| Ctx { interactive: false, args: Args { uninstall: true, relay, host, ..Default::default() } };
+        assert_eq!(ctx(false, false).removing(&found(true, true)).unwrap(), (true, true));
+        assert_eq!(ctx(true, false).removing(&found(true, true)).unwrap(), (true, false));
+        assert_eq!(ctx(false, true).removing(&found(true, true)).unwrap(), (false, true));
+        assert_eq!(ctx(false, false).removing(&found(false, true)).unwrap(), (false, true));
+        assert!(ctx(true, false).removing(&found(false, true)).is_err(), "no relay to remove");
+        assert!(ctx(false, false).removing(&found(false, false)).is_err());
+    }
 }

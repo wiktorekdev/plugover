@@ -6,7 +6,8 @@ use crate::{
     auth,
     catalog::{self, Identity, UsbIds},
     discovery, net,
-    proto::{self, DeviceInfo, PairConfirm, PairHello, PairReply, Snapshot},
+    tls,
+    proto::{self, DeviceInfo, PairConfirm, PairHello, PairReply, Ping, Pong, Snapshot},
     state::{self, PairedHost, PairingWindow, RelayState},
     usbip,
     usbipd::Device,
@@ -31,7 +32,7 @@ const PAIR_ATTEMPTS: u8 = 5;
 const CODE_HINT: &str = "run `plugover code` as administrator";
 #[cfg(not(windows))]
 const CODE_HINT: &str = "run `sudo plugover code`";
-const HEARTBEAT: Duration = Duration::from_secs(5);
+const HEARTBEAT: Duration = Duration::from_secs(2);
 /// How often hosts hear about plugs without uevents (Windows); also how long one device scan is
 /// reused between them.
 const POLL: Duration = Duration::from_millis(500);
@@ -150,8 +151,10 @@ impl Relay {
             r => r?,
         }
         match &magic {
-            proto::DATA => self.lend(s),
-            proto::CONTROL => self.control(s),
+            proto::DATA => self.lend(s, false),
+            proto::DATA_ENCRYPTED => self.lend(s, true),
+            proto::CONTROL => self.control(s, false),
+            proto::CONTROL_ENCRYPTED => self.control(s, true),
             proto::PAIR => self.pair(s),
             _ => bail!("not a Plugover host"),
         }
@@ -171,7 +174,7 @@ impl Relay {
         Ok((host, nonce))
     }
 
-    fn lend(&self, mut s: TcpStream) -> Result<()> {
+    fn lend(&self, mut s: TcpStream, encrypted: bool) -> Result<()> {
         let (host, nonce) = self.challenge(&mut s)?;
         let mut tag = [0u8; auth::TAG_LEN];
         s.read_exact(&mut tag)?;
@@ -181,18 +184,28 @@ impl Relay {
         } else {
             Err(anyhow!("{} failed the challenge", host.name))
         };
+        let key = state::decode_key(&host.key)?;
+        let crypt = encrypted.then_some((&key, &nonce));
         let dev = match dev {
             Ok(d) => d,
             Err(e) => {
-                usbip::write_import_reply(&mut s, None)?;
+                refuse(&s, crypt)?;
                 return Err(e);
             }
         };
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsRawFd;
+            // The kernel takes the host's connection, or, where it cannot encrypt it, one end of a
+            // local socket whose other end Plugover encrypts towards the host.
+            let (mut relayed, mut kernel) = (None, false);
             let handed = sysfs::export_bind(&self.sys, &busid).and_then(|()| {
                 net::tune(&s)?;
+                kernel = encrypted && net::encrypt(&s, &key, &nonce, true)?;
+                if encrypted && !kernel {
+                    relayed = Some(net::hand_over(|fd| sysfs::export_socket(&self.sys, &busid, fd))?);
+                    return Ok(());
+                }
                 // Same order as usbipd: the kernel takes the socket, then the reply goes out.
                 sysfs::export_socket(&self.sys, &busid, s.as_raw_fd())
             });
@@ -204,20 +217,30 @@ impl Relay {
                 {
                     eprintln!("could not give {busid} back: {e}");
                 }
-                let _ = usbip::write_import_reply(&mut s, None);
+                let _ = refuse(&s, crypt.filter(|_| !kernel));
                 return Err(anyhow!(e).context(format!("lending {busid} to {}", host.name)));
             }
             if let Some(l) = self.lent.lock().unwrap().get_mut(&busid) {
                 l.live = true;
             }
-            usbip::write_import_reply(&mut s, Some(&net::exported(&dev.dev)))?;
+            let reply = Some(net::exported(&dev.dev));
+            match relayed {
+                None => usbip::write_import_reply(&mut s, reply.as_ref())?,
+                Some(ours) => {
+                    let (r, mut w) = tls::wrap(s.try_clone()?, s.try_clone()?, &key, &nonce, true);
+                    usbip::write_import_reply(&mut w, reply.as_ref())?;
+                    // tend() takes the device back once either side hangs up.
+                    thread::spawn(move || ours.pump(s, r, w));
+                }
+            }
             eprintln!("lent {busid} to {}", host.name);
             // tend() takes it back.
         }
         #[cfg(windows)]
         {
             eprintln!("lent {busid} to {}", host.name);
-            let result = crate::usbipd::lend(s, &dev);
+            let crypt = encrypted.then(|| -> Result<_> { Ok(tls::wrap(s.try_clone()?, s.try_clone()?, &key, &nonce, true)) }).transpose()?;
+            let result = crate::usbipd::lend(s, &dev, crypt);
             self.lent.lock().unwrap().remove(&busid);
             eprintln!("{busid} is back from {}", host.name);
             result?;
@@ -238,7 +261,7 @@ impl Relay {
         let now = *self.changes.lock().unwrap();
         let mut scanned = self.scanned.lock().unwrap();
         match &*scanned {
-            Some((at, seen, devs)) if at.elapsed() < POLL && Some(*seen) == now => Ok(devs.clone()),
+            Some((at, seen, devs)) if at.elapsed() < POLL && *seen == now.unwrap_or(0) => Ok(devs.clone()),
             _ => {
                 let devs = self.scan()?;
                 *scanned = Some((Instant::now(), now.unwrap_or(0), devs.clone()));
@@ -288,30 +311,51 @@ impl Relay {
         Ok(dev)
     }
 
-    fn control(&self, mut s: TcpStream) -> Result<()> {
+    fn control(&self, mut s: TcpStream, encrypted: bool) -> Result<()> {
         let (host, nonce) = self.challenge(&mut s)?;
         let mut tag = [0u8; auth::TAG_LEN];
         s.read_exact(&mut tag)?;
-        ensure!(
-            auth::verify(&state::decode_key(&host.key)?, &nonce, proto::CONTROL_CONTEXT, &tag),
-            "{} failed the challenge",
-            host.name
-        );
+        let key = state::decode_key(&host.key)?;
+        ensure!(auth::verify(&key, &nonce, proto::CONTROL_CONTEXT, &tag), "{} failed the challenge", host.name);
+        if !encrypted {
+            eprintln!("{} connects without encryption; update Plugover on it", host.name);
+        }
         net::tune(&s)?;
         s.set_write_timeout(Some(HEARTBEAT))?;
-        let (mut last, mut sent_at) = (None, Instant::now());
-        let mut seen = *self.changes.lock().unwrap();
-        loop {
-            let st = self.state()?;
-            ensure!(st.hosts.iter().any(|h| h.id == host.id), "{} was unpaired", host.name);
-            let snap = self.snapshot(&st)?;
-            if last.as_ref() != Some(&snap) || sent_at.elapsed() >= HEARTBEAT {
-                proto::send(&mut s, &snap)?;
-                (last, sent_at) = (Some(snap), Instant::now());
+        let (r, w): (Box<dyn Read + Send>, Box<dyn Write + Send>) = if encrypted {
+            let (r, w) = tls::wrap(s.try_clone()?, s.try_clone()?, &key, &nonce, true);
+            (Box::new(r), Box::new(w))
+        } else {
+            (Box::new(s.try_clone()?), Box::new(s.try_clone()?))
+        };
+        // Pings come in on the same connection; answering them shares the writer.
+        let w = Arc::new(Mutex::new(w));
+        let (mut r, pong) = (BufReader::new(r), w.clone());
+        thread::spawn(move || {
+            while let Ok(Ping { ping }) = proto::recv(&mut r) {
+                if proto::send(&mut *pong.lock().unwrap(), &Pong { pong: ping }).is_err() {
+                    break;
+                }
             }
-            // ponytail: Windows still polls `usbipd state`; device notifications would make it instant.
-            self.wait(&mut seen);
-        }
+        });
+        let result = (|| {
+            let (mut last, mut sent_at) = (None, Instant::now());
+            let mut seen = *self.changes.lock().unwrap();
+            loop {
+                let st = self.state()?;
+                ensure!(st.hosts.iter().any(|h| h.id == host.id), "{} was unpaired", host.name);
+                let snap = self.snapshot(&st)?;
+                if last.as_ref() != Some(&snap) || sent_at.elapsed() >= HEARTBEAT {
+                    proto::send(&mut *w.lock().unwrap(), &snap)?;
+                    (last, sent_at) = (Some(snap), Instant::now());
+                }
+                // ponytail: Windows still polls `usbipd state`; device notifications would make it instant.
+                self.wait(&mut seen);
+            }
+        })();
+        // Ends the ping reader too.
+        let _ = s.shutdown(std::net::Shutdown::Both);
+        result
     }
 
     fn snapshot(&self, st: &RelayState) -> Result<Snapshot> {
@@ -342,7 +386,7 @@ impl Relay {
                 }
             })
             .collect();
-        Ok(Snapshot { relay_id: self.id.clone(), relay: self.name.clone(), devices, version: proto::VERSION.into() })
+        Ok(Snapshot { relay_id: self.id.clone(), relay: self.name.clone(), devices, version: proto::VERSION.into(), encrypted: false })
     }
 
     fn pair(&self, s: TcpStream) -> Result<()> {
@@ -367,11 +411,16 @@ impl Relay {
             hex::decode(&hello.host_id).ok().and_then(|b| b.try_into().ok()).context("pairing request has a malformed id")?;
         let host_msg = hex::decode(&hello.pake).context("pairing request has a malformed key")?;
         let (pake, msg) = auth::pake_start(&window.code, false);
-        proto::send(&mut w, &PairReply::Pake { relay_id: self.id.clone(), relay: self.name.clone(), pake: hex::encode(msg) })?;
+        proto::send(&mut w, &PairReply::Pake { relay_id: self.id.clone(), relay: self.name.clone(), pake: hex::encode(msg), version: proto::VERSION.into() })?;
         let confirm: PairConfirm = proto::recv(&mut r)?;
         let key = auth::pake_finish(pake, &host_msg).context("pairing request has a malformed key")?;
         // The host proves the code first; a wrong guess learns nothing and costs an attempt.
         if !auth::verify(&key, &host_id, auth::CONFIRM_HOST, &hex::decode(confirm.tag).unwrap_or_default()) {
+            // `plugover code` may have opened a new window meanwhile; that one keeps its tries.
+            let current: PairingWindow = state::load(&window_path)?;
+            if current.code != window.code {
+                return Err(refuse(&mut w, format!("wrong code from {}; a new code was printed since", hello.name)));
+            }
             window.attempts -= 1;
             if window.attempts == 0 {
                 let _ = fs::remove_file(&window_path);
@@ -396,6 +445,9 @@ impl Relay {
     /// Takes devices back from hosts that let go, died or were unpaired.
     // ponytail: runs every second; a uevent watch would react to a dropped link instantly.
     fn tend(&self) {
+        if self.lent.lock().unwrap().is_empty() {
+            return;
+        }
         // Unreadable state revokes nothing: a broken file should not unplug anyone's wheel.
         let paired: Option<Vec<String>> = self.state().ok().map(|st| st.hosts.into_iter().map(|h| h.id).collect());
         self.lent.lock().unwrap().retain(|busid, l| {
@@ -433,6 +485,15 @@ impl Relay {
             let _ = c.shutdown(std::net::Shutdown::Both);
         }
         true
+    }
+}
+
+/// Tells the host its import failed; through `crypt` when it encrypts and the kernel does not
+/// already.
+fn refuse(s: &TcpStream, crypt: Option<(&auth::Key, &[u8; 32])>) -> std::io::Result<()> {
+    match crypt {
+        Some((key, nonce)) => usbip::write_import_reply(&mut tls::wrap(std::io::empty(), s, key, nonce, true).1, None),
+        None => usbip::write_import_reply(&mut &*s, None),
     }
 }
 
@@ -501,46 +562,102 @@ mod tests {
         let server = relay.clone();
         thread::spawn(move || server.accept(listener));
 
-        let mut paired = PairedRelay { id: "r1".into(), name: "relay".into(), address, host_id: hex::encode([1u8; 8]), key: key.clone() };
+        let mut paired = PairedRelay {
+            id: "r1".into(),
+            name: "relay".into(),
+            address,
+            host_id: hex::encode([1u8; 8]),
+            key: key.clone(),
+            encrypts: true,
+            unencrypted: false,
+        };
         let mut seen = None;
-        host::watch(&paired, |snap| {
-            seen = Some(snap);
-            false
-        })
+        host::watch(
+            &paired,
+            |snap| {
+                seen = Some(snap);
+                false
+            },
+            |_| {},
+        )
         .unwrap();
         let snap = seen.expect("a snapshot arrives");
+        assert!(snap.encrypted);
         assert_eq!((snap.relay_id.as_str(), snap.devices.len()), ("r1", 1));
+
+        // A relay before 0.6 gets a plain control channel, unless it encrypted before.
+        let old = old_relay(paired.address.clone());
+        let real = std::mem::replace(&mut paired.address, old);
+        let err = host::watch(&paired, |_| false, |_| {}).unwrap_err();
+        assert!(format!("{err:#}").contains("stopped encrypting"), "{err:#}");
+        paired.encrypts = false;
+        let mut plain = None;
+        host::watch(&paired, |snap| { plain = Some(snap.encrypted); false }, |_| {}).unwrap();
+        assert_eq!(plain, Some(false));
+        (paired.address, paired.encrypts) = (real, true);
         assert_eq!((snap.devices[0].id.as_str(), snap.devices[0].identity.title.as_str()), ("046d:c24f", "Logitech G29 Driving Force"));
 
+        // The relay answers the host's pings, so the link gets timed.
+        let rtt = std::cell::Cell::new(None);
+        host::watch(&paired, |_| rtt.get().is_none(), |d| rtt.set(Some(d))).unwrap();
+        assert!(rtt.get().is_some_and(|d| d < Duration::from_secs(1)), "{:?}", rtt.get());
+
         paired.key = hex::encode([8u8; 32]);
-        assert!(host::watch(&paired, |_| false).is_err(), "a wrong key gets no snapshots");
+        assert!(host::watch(&paired, |_| false, |_| {}).is_err(), "a wrong key gets no snapshots");
         paired.key = key;
 
         // This fake sysfs has no usbip-host, so handing the device over fails; the claim on it
         // must not outlive the attempt.
         #[cfg(target_os = "linux")]
         {
-            let Err(err) = crate::vhci::attach(&root.join("sys"), &paired, "1-2") else { panic!("attached without usbip-host") };
-            assert!(format!("{err:#}").contains("refused"), "{err:#}");
-            assert!(relay.lent.lock().unwrap().is_empty(), "a failed lend leaves nothing claimed");
+            for encrypt in [true, false] {
+                let Err(err) = crate::vhci::attach(&root.join("sys"), &paired, "1-2", encrypt) else { panic!("attached without usbip-host") };
+                assert!(format!("{err:#}").contains("refused"), "the refusal arrives, encrypted or not: {err:#}");
+                assert!(relay.lent.lock().unwrap().is_empty(), "a failed lend leaves nothing claimed");
+            }
         }
 
         // The share list applies to a running relay right away.
         share(&root.join("relay.toml"), Some(("045e:028e", true))).unwrap();
         let mut seen = None;
-        host::watch(&paired, |snap| {
-            seen = Some(snap);
-            false
-        })
+        host::watch(
+            &paired,
+            |snap| {
+                seen = Some(snap);
+                false
+            },
+            |_| {},
+        )
         .unwrap();
         assert_eq!(seen.unwrap().devices[0].identity.blocked.as_deref(), Some("not shared by the relay"));
 
         // So does unpairing: the host is told, not just dropped.
         assert_eq!(unpair(&root.join("relay.toml"), "desktop").unwrap().name, "desktop");
-        let err = host::watch(&paired, |_| false).unwrap_err();
+        let err = host::watch(&paired, |_| false, |_| {}).unwrap_err();
         assert!(format!("{err:#}").contains("pair again"), "{err:#}");
         assert!(unpair(&root.join("relay.toml"), "desktop").is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A relay before 0.6: hangs up on the encrypted channels and passes the rest to `real`.
+    fn old_relay(real: String) -> String {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = l.local_addr().unwrap().to_string();
+        thread::spawn(move || {
+            for mut c in l.incoming().flatten() {
+                let real = real.clone();
+                thread::spawn(move || {
+                    let mut magic = [0u8; 4];
+                    if c.read_exact(&mut magic).is_err() || magic[3] == b'2' {
+                        return;
+                    }
+                    let mut up = TcpStream::connect(&real).unwrap();
+                    up.write_all(&magic).unwrap();
+                    let _ = net::pump(c, up.try_clone().unwrap(), up.try_clone().unwrap(), up);
+                });
+            }
+        });
+        address
     }
 
     #[test]
@@ -563,7 +680,8 @@ mod tests {
         assert!(err.contains("wrong code") && err.contains("4 tries left"), "{err}");
 
         let paired = host::pair(&address, "desktop", &code).unwrap();
-        assert!(host::watch(&paired, |_| false).is_ok(), "the new key opens the control channel");
+        assert!(paired.encrypts, "a relay that says its version when pairing encrypts");
+        assert!(host::watch(&paired, |_| false, |_| {}).is_ok(), "the new key opens the control channel");
         let st: RelayState = state::load(&state_path).unwrap();
         assert_eq!(st.hosts.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), ["desktop"]);
 

@@ -1,5 +1,5 @@
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
-  - name: Question or idea
-    url: https://github.com/wiktorekdev/plugover/discussions
-    about: Ask questions and share setups in Discussions
+  - name: Security vulnerability
+    url: https://github.com/wiktorekdev/plugover/security/advisories/new
+    about: Report it privately, not in a public issue

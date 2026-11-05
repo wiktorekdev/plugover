@@ -16,13 +16,14 @@ mod setup;
 mod state;
 mod sysfs;
 mod term;
+mod tls;
 mod usbip;
 mod usbipd;
 mod vhci;
 
 use anstream::{eprintln, println};
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use hostd::Request;
 use std::{env, path::PathBuf, process::ExitCode};
 use cli::{ask, choose_relay, print_code, print_discovered, print_hosts, print_share, print_status};
@@ -58,17 +59,32 @@ enum Cmd {
     /// Pair with a relay using the code from `plugover code` on it. Without an address, finds
     /// the relay on the network; without --code, asks for it.
     Pair {
+        /// The relay's IP address or name; port 7275 unless you add one.
         address: Option<String>,
+        /// The six digits `plugover code` printed on the relay.
         #[arg(long)]
         code: Option<String>,
     },
     /// Forget a paired relay.
-    Forget { relay: String },
-    /// Plug a device (vendor:product, see `plugover status`) in whenever a stream runs.
-    Auto {
-        device: String,
-        #[arg(value_parser = ["on", "off"])]
+    Forget {
+        /// Its name or id, see `plugover status`.
+        relay: String,
+    },
+    /// Connect a relay's devices without encryption, for a relay whose Plugover is too old to
+    /// encrypt. Anyone on the network could then watch them, or fake input.
+    Unencrypted {
+        /// Its name or id, see `plugover status`.
+        relay: String,
+        #[arg(value_name = "on|off", value_parser = ["on", "off"])]
         state: String,
+    },
+    /// Plug a device in whenever a stream runs.
+    Auto {
+        /// vendor:product, see `plugover status`.
+        device: String,
+        #[arg(value_name = "on|off", value_parser = ["on", "off"])]
+        state: String,
+        /// Which relay, by name or id; needed only when several are paired.
         #[arg(long)]
         relay: Option<String>,
         /// Only the one on this port (busid, see `plugover status`), when several of the same
@@ -92,13 +108,17 @@ enum Cmd {
     },
     /// Plug a device from the relay in now.
     Attach {
+        /// Its port on the relay, the second column of `plugover status` (such as 1-4).
         busid: String,
+        /// Which relay, by name or id; needed only when several are paired.
         #[arg(long)]
         relay: Option<String>,
     },
     /// Unplug a device plugged in with `attach`.
     Detach {
+        /// Its port on the relay, the second column of `plugover status` (such as 1-4).
         busid: String,
+        /// Which relay, by name or id; needed only when several are paired.
         #[arg(long)]
         relay: Option<String>,
     },
@@ -171,6 +191,7 @@ enum Cmd {
         state: PathBuf,
     },
     /// Lend devices to paired hosts (the relay service runs this).
+    #[command(hide = true)]
     Relay {
         #[arg(long, default_value_t = proto::DEFAULT_PORT)]
         port: u16,
@@ -178,6 +199,7 @@ enum Cmd {
         state: PathBuf,
     },
     /// Run the host daemon (the host service runs this).
+    #[command(hide = true)]
     Host {
         #[arg(long, default_value_os_t = config_dir().join("host.toml"))]
         config: PathBuf,
@@ -292,6 +314,15 @@ fn run(cli: Cli) -> Result<()> {
             call(Request::Forget { relay: relay.clone() })?;
             done(format!("Forgot {}.", paint(BOLD, relay)));
         }
+        Cmd::Unencrypted { relay, state } => {
+            let on = state == "on";
+            call(Request::Unencrypted { relay: relay.clone(), on })?;
+            done(if on {
+                format!("{}'s devices now connect without encryption. Update Plugover on it to encrypt them again.", paint(BOLD, relay))
+            } else {
+                format!("{}'s devices connect only encrypted again.", paint(BOLD, relay))
+            });
+        }
         Cmd::Label { device, name, kind, reset } => {
             if !reset && name.is_none() && kind.is_none() {
                 anyhow::bail!("pass --name, --kind or --reset");
@@ -341,13 +372,26 @@ fn double_clicked() -> bool {
     unsafe { GetConsoleProcessList(ids.as_mut_ptr(), 2) == 1 }
 }
 
+/// The command line, listing only the commands for the roles set up here; the others still work.
+fn command() -> clap::Command {
+    let host = endpoint().exists() || config_dir().join("host.toml").exists();
+    let relay = relay_state().exists();
+    let hide: &[&str] = match (host, relay) {
+        (true, false) => &["code", "hosts", "unpair", "share"],
+        (false, true) => &["status", "discover", "pair", "forget", "unencrypted", "auto", "label", "attach", "detach"],
+        _ => &[],
+    };
+    hide.iter().fold(Cli::command(), |c, name| c.mut_subcommand(name, |s| s.hide(true)))
+}
+
 fn main() -> ExitCode {
     #[cfg(windows)]
     if env::args_os().len() == 1 && double_clicked() {
         let args = setup::Args { pause: true, ..Default::default() };
         return if setup::run(args).is_ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
     }
-    let Err(e) = run(Cli::parse()) else { return ExitCode::SUCCESS };
+    let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
+    let Err(e) = run(cli) else { return ExitCode::SUCCESS };
     if e.is::<setup::Reported>() {
         return ExitCode::FAILURE;
     }

@@ -5,7 +5,7 @@
 #   installer.sh, installer.ps1              download the binary of this release and run setup
 #   plugover_<version>_{amd64,arm64,armhf}.deb   Debian packages
 #   winget/                                  manifests for a microsoft/winget-pkgs pull request
-#   SHA256SUMS
+#   SHA256SUMS, SHA256SUMS.sig                checksums, signed with the release key
 # The console plugin is built first and goes inside every binary.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -60,4 +60,14 @@ for arch in "${!linux[@]}"; do
 done
 
 (cd dist && sha256sum -- plugover* installer.* >SHA256SUMS)
+# `plugover update` installs only releases signed with this key (its public half is
+# packaging/release-key.pem, and in src/setup/mod.rs). Keep a backup: without it, no update can be
+# signed and every install would have to be updated by hand.
+key=${PLUGOVER_SIGNING_KEY:-$HOME/.config/plugover-release/key.pem}
+if [ -r "$key" ]; then
+    openssl pkeyutl -sign -inkey "$key" -rawin -in dist/SHA256SUMS -out dist/SHA256SUMS.sig
+    openssl pkeyutl -verify -pubin -inkey packaging/release-key.pem -rawin -in dist/SHA256SUMS -sigfile dist/SHA256SUMS.sig >/dev/null
+else
+    echo "warning: no signing key at $key, so SHA256SUMS is unsigned and plugover update will refuse this release" >&2
+fi
 find dist -type f | sort

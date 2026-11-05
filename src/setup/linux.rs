@@ -13,7 +13,8 @@ const RELAY_UNIT: &str = "/etc/systemd/system/plugover-relay.service";
 const RELAY_STATE: &str = "/var/lib/plugover";
 /// What setup opened in the firewall, so uninstall removes exactly that.
 const FIREWALL_RECORD: &str = "/var/lib/plugover/firewall";
-const MODULES: &str = "/etc/modules-load.d/plugover.conf";
+/// Before 0.5.1 both roles' modules shared this file, so removing one role dropped the other's.
+const OLD_MODULES: &str = "/etc/modules-load.d/plugover.conf";
 const NFT_CONF: &str = "/etc/nftables.conf";
 const VHCI: &str = "/sys/devices/platform/vhci_hcd.0";
 const PORT: u16 = crate::proto::DEFAULT_PORT;
@@ -115,7 +116,10 @@ pub fn get_root() -> Result<()> {
     probe("sudo", &["--version"]).context("this needs root and sudo is not installed; run setup as root")?;
     println!("\n  {}", paint(DIM, "Some steps need root; sudo may ask for your password."));
     let ok = Command::new("sudo").arg("-v").status().is_ok_and(|s| s.success());
-    anyhow::ensure!(ok, "sudo was refused");
+    anyhow::ensure!(
+        ok,
+        if stdin().is_terminal() { "sudo was refused" } else { "sudo needs a terminal to ask for your password; run setup from one, or as root" }
+    );
     Ok(())
 }
 
@@ -175,7 +179,8 @@ pub fn detect() -> Result<Found> {
     let host = unit_bin(&host_unit()).and_then(|b| version_of(&b));
 
     let mut lines = vec![line(Mark::Ok, os, format!("{}{}", std::env::consts::ARCH, systemd.as_ref().map(|s| format!(" · {s}")).unwrap_or_default()))];
-    if systemd.is_none() {
+    // Installed is not enough: containers and WSL often have systemctl without systemd running.
+    if systemd.is_none() || !Path::new("/run/systemd/system").is_dir() {
         bail!("Plugover runs as a systemd service, and systemd is not running here");
     }
     lines.push(match &punktfunk {
@@ -220,13 +225,34 @@ fn install_self(target: &Path, as_root: bool) -> Result<()> {
     if as_root { root("install", &args).map(drop) } else { exec(Command::new("install").args(args)).map(drop) }
 }
 
+/// One file per module, so each role removes only its own.
+fn modules_file(name: &str) -> String {
+    format!("/etc/modules-load.d/plugover-{name}.conf")
+}
+
+/// Loads `name` now and at every boot, with `tls` alongside where this kernel has it, so the
+/// kernel encrypts USB traffic itself.
 fn load_module(name: &str) -> Result<()> {
     root("modprobe", &[name])?;
-    let conf = fs::read_to_string(MODULES).unwrap_or_default();
-    if !conf.lines().any(|l| l.trim() == name) {
-        root_write(MODULES, &format!("{conf}{name}\n"))?;
-    }
-    Ok(())
+    let tls = has_module("tls") && root("modprobe", &["tls"]).is_ok();
+    root_write(&modules_file(name), &if tls { format!("{name}\ntls\n") } else { format!("{name}\n") })
+}
+
+fn tls_loaded() -> bool {
+    Path::new("/sys/module/tls").exists() || !has_module("tls")
+}
+
+/// Our file loads `name`, and tls where there is one, at every boot.
+fn loads_at_boot(name: &str) -> bool {
+    let wanted = |c: &str, m: &str| c.lines().any(|l| l.trim() == m);
+    fs::read_to_string(modules_file(name)).is_ok_and(|c| wanted(&c, name) && (!has_module("tls") || wanted(&c, "tls")))
+}
+
+/// Takes `name` out of the pre-0.5.1 shared file, keeping the other role's module.
+fn forget_old_module(name: &str) -> Result<()> {
+    let Ok(conf) = fs::read_to_string(OLD_MODULES) else { return Ok(()) };
+    let rest: String = conf.lines().filter(|l| l.trim() != name).map(|l| format!("{l}\n")).collect();
+    if rest.trim().is_empty() { root("rm", &["-f", OLD_MODULES]).map(drop) } else { root_write(OLD_MODULES, &rest) }
 }
 
 // --- Relay -------------------------------------------------------------------------------------
@@ -257,16 +283,20 @@ fn plan_relay(found: &Found, ctx: &Ctx) -> Result<Plan> {
     }
     let mut lines = vec![install_line(&found.relay, "relay", &format!("{}, systemd service", relay_bin()))];
     let loaded = Path::new("/sys/bus/usb/drivers/usbip-host").is_dir();
-    lines.push(if loaded { line(Mark::Ok, "usbip-host", "loaded") } else { line(Mark::Todo, "Load usbip-host", "now and at every boot") });
+    lines.push(if loaded && tls_loaded() {
+        line(Mark::Ok, "usbip-host and tls", "loaded")
+    } else {
+        line(Mark::Todo, "Load usbip-host and tls", "now and at every boot; tls lets the kernel encrypt")
+    });
     let firewall = Firewall::detect();
     let lan = match (firewall, &ctx.args.lan) {
         (Firewall::None, _) => None,
-        (_, Some(l)) => Some(l.clone()),
-        _ => Some(ctx.ask("Let hosts in from which network?", &guess_lan())?),
+        (_, Some(l)) => Some(networks(l)?),
+        _ => Some(networks(&ctx.ask("Let hosts in from which networks? (comma-separated)", &guess_lan())?)?),
     };
     match &lan {
         None => lines.push(line(Mark::Ok, "Firewall", format!("none running, port {PORT} is reachable"))),
-        Some(l) => lines.push(line(Mark::Todo, format!("Open TCP {PORT} and mDNS in {}", firewall.name()), format!("for {l}"))),
+        Some(l) => lines.push(line(Mark::Todo, format!("Open TCP {PORT} and mDNS in {}", firewall.name()), format!("for {}", l.join(", ")))),
     }
     let new_code = found.relay.is_none() || (ctx.interactive && !ctx.args.yes && ctx.confirm("Print a new pairing code at the end?", false)?);
     if new_code {
@@ -279,7 +309,7 @@ fn plan_relay(found: &Found, ctx: &Ctx) -> Result<Plan> {
         ("Starting the relay service".into(), Box::new(start_relay)),
     ];
     if let Some(lan) = lan.clone() {
-        steps.push((format!("Opening the firewall for {lan}"), Box::new(move || open_firewall(firewall, &lan))));
+        steps.push((format!("Opening the firewall for {}", lan.join(", ")), Box::new(move || open_firewall(firewall, &lan))));
     }
     steps.push(("Checking that the relay answers".into(), Box::new(|| wait_for("the relay", relay_answers))));
 
@@ -291,7 +321,7 @@ fn plan_relay(found: &Found, ctx: &Ctx) -> Result<Plan> {
         } else {
             ok("The relay is up to date", "pairings are kept");
         }
-        println!("\n  {} on the host, open USB devices in the punktfunk console, or run {}.", paint(DIM, "Next:"), cmd("plugover pair"));
+        println!("\n  {} on the host, open Plugover in the punktfunk console, or run {}.", paint(DIM, "Next:"), cmd("plugover pair"));
         Ok(())
     });
     Ok(Plan { lines, steps, root: true, after })
@@ -313,20 +343,24 @@ fn firewalld_rules(lan: &str) -> [String; 2] {
     ]
 }
 
-fn open_firewall(firewall: Firewall, lan: &str) -> Result<()> {
+fn open_firewall(firewall: Firewall, lan: &[String]) -> Result<()> {
     root("mkdir", &["-p", RELAY_STATE])?;
-    root_write(FIREWALL_RECORD, &format!("{} {lan}\n", firewall.name()))?;
+    // A run before may have opened it for other networks; only the record knows those rules.
+    let _ = close_firewall();
+    root_write(FIREWALL_RECORD, &format!("{} {}\n", firewall.name(), lan.join(" ")))?;
     match firewall {
         Firewall::None => {}
         Firewall::Firewalld => {
-            for rule in firewalld_rules(lan) {
+            for rule in lan.iter().flat_map(|l| firewalld_rules(l)) {
                 root("firewall-cmd", &["-q", "--permanent", &format!("--add-rich-rule={rule}")])?;
             }
             root("firewall-cmd", &["-q", "--reload"])?;
         }
         Firewall::Ufw => {
-            for (port, proto) in [(PORT.to_string(), "tcp"), ("5353".into(), "udp")] {
-                root("ufw", &["allow", "from", lan, "to", "any", "port", &port, "proto", proto, "comment", "plugover"])?;
+            for l in lan {
+                for (port, proto) in [(PORT.to_string(), "tcp"), ("5353".into(), "udp")] {
+                    root("ufw", &["allow", "from", l, "to", "any", "port", &port, "proto", proto, "comment", "plugover"])?;
+                }
             }
         }
         Firewall::Nftables => open_nftables(lan)?,
@@ -334,15 +368,15 @@ fn open_firewall(firewall: Firewall, lan: &str) -> Result<()> {
     Ok(())
 }
 
-fn open_nftables(lan: &str) -> Result<()> {
+fn open_nftables(lan: &[String]) -> Result<()> {
     let chain = root("nft", &["list", "chain", "inet", "filter", "input"])
         .context("there is no nftables 'inet filter input' chain; open TCP 7275 and UDP 5353 yourself")?;
     let rules = [format!("tcp dport {PORT}"), "udp dport 5353".to_string()];
-    for rule in &rules {
-        if !chain.contains(&format!("{rule} ip saddr {lan} accept comment \"plugover\"")) {
+    for (rule, l) in rules.iter().flat_map(|r| lan.iter().map(move |l| (r, l))) {
+        if !chain.contains(&format!("{rule} ip saddr {l} accept comment \"plugover\"")) {
             let mut args = vec!["insert", "rule", "inet", "filter", "input"];
             args.extend(rule.split(' '));
-            args.extend(["ip", "saddr", lan, "accept", "comment", "\"plugover\""]);
+            args.extend(["ip", "saddr", l, "accept", "comment", "\"plugover\""]);
             root("nft", &args)?;
         }
     }
@@ -361,17 +395,22 @@ fn open_nftables(lan: &str) -> Result<()> {
     Ok(())
 }
 
-/// The config with our two rules right after the first input hook, so nothing earlier in the chain
-/// can drop the traffic.
-fn with_nft_rules(conf: &str, lan: &str) -> Option<String> {
+/// The config with our two rules right after the input hook of `inet filter`, the chain the live
+/// rules went into, so nothing earlier in it can drop the traffic.
+fn with_nft_rules(conf: &str, lan: &[String]) -> Option<String> {
     let mut out = String::new();
-    let mut done = false;
+    let (mut done, mut in_filter) = (false, false);
     for l in conf.lines() {
         out.push_str(l);
         out.push('\n');
-        if !done && l.contains("hook input") {
-            out.push_str(&format!("    tcp dport {PORT} ip saddr {lan} accept comment \"plugover\"\n"));
-            out.push_str(&format!("    udp dport 5353 ip saddr {lan} accept comment \"plugover\"\n"));
+        if l.trim_start().starts_with("table ") {
+            in_filter = l.split_whitespace().take(3).eq(["table", "inet", "filter"]);
+        }
+        if !done && in_filter && l.contains("hook input") {
+            for l in lan {
+                out.push_str(&format!("    tcp dport {PORT} ip saddr {l} accept comment \"plugover\"\n"));
+                out.push_str(&format!("    udp dport 5353 ip saddr {l} accept comment \"plugover\"\n"));
+            }
             done = true;
         }
     }
@@ -381,11 +420,11 @@ fn with_nft_rules(conf: &str, lan: &str) -> Option<String> {
 fn close_firewall() -> Result<()> {
     let Some(record) = root_read(FIREWALL_RECORD) else { return Ok(()) };
     let mut words = record.split_whitespace();
-    let (firewall, lan) = (Firewall::parse(words.next().unwrap_or_default()), words.next().unwrap_or_default());
+    let firewall = Firewall::parse(words.next().unwrap_or_default());
     match firewall {
         Firewall::None => {}
         Firewall::Firewalld => {
-            for rule in firewalld_rules(lan) {
+            for rule in words.flat_map(firewalld_rules) {
                 let _ = root("firewall-cmd", &["-q", "--permanent", &format!("--remove-rich-rule={rule}")]);
             }
             root("firewall-cmd", &["-q", "--reload"])?;
@@ -443,8 +482,14 @@ fn plan_host(found: &Found) -> Result<Plan> {
     anyhow::ensure!(!is_root(), "install the host as your normal user, not root: it runs next to punktfunk in your session");
     anyhow::ensure!(has_module("vhci-hcd"), "this kernel has no vhci-hcd module, which the host needs");
     let mut lines = vec![install_line(&found.host, "host", &format!("{}, systemd user service", host_bin().display()))];
-    let loaded = Path::new(VHCI).is_dir();
-    lines.push(if loaded { line(Mark::Ok, "vhci-hcd", "loaded") } else { line(Mark::Todo, "Load vhci-hcd", "now and at every boot") });
+    let vhci = Path::new(VHCI).is_dir();
+    // Loaded by hand is not enough; they must come back after a reboot.
+    let loaded = vhci && tls_loaded() && loads_at_boot("vhci-hcd");
+    lines.push(if loaded {
+        line(Mark::Ok, "vhci-hcd and tls", "loaded")
+    } else {
+        line(Mark::Todo, "Load vhci-hcd and tls", "now and at every boot; tls lets the kernel encrypt")
+    });
     let plugin = found.punktfunk && !PLUGIN.is_empty();
     lines.push(match (found.punktfunk, PLUGIN.is_empty()) {
         (true, false) => line(Mark::Todo, "Add the Plugover page to the punktfunk console", "and turn its plugin runner on"),
@@ -453,19 +498,19 @@ fn plan_host(found: &Found) -> Result<Plan> {
     });
     // punktfunk-host's udev rule lets its group plug devices in.
     let writable = fs::OpenOptions::new().write(true).open(Path::new(VHCI).join("attach")).is_ok();
-    let join_group = loaded && !writable && probe("getent", &["group", "punktfunk"]).is_some() && !user_in_group("punktfunk");
+    let join_group = vhci && !writable && probe("getent", &["group", "punktfunk"]).is_some() && !user_in_group("punktfunk");
     if join_group {
         lines.push(line(Mark::Todo, "Add you to the punktfunk group", "so you may plug devices in; takes effect at your next login"));
-    } else if loaded && !writable {
+    } else if vhci && !writable {
         lines.push(line(Mark::Warn, "You may not plug devices in", format!("{VHCI}/attach is not writable for you")));
     }
 
     let mut steps: Vec<(String, Action)> = Vec::new();
     if !loaded {
-        steps.push(("Loading vhci-hcd".into(), Box::new(|| load_module("vhci-hcd"))));
+        steps.push(("Loading kernel modules".into(), Box::new(|| load_module("vhci-hcd"))));
     }
     if join_group {
-        let user = std::env::var("USER").unwrap_or_default();
+        let user = probe("id", &["-un"]).unwrap_or_default();
         steps.push(("Adding you to the punktfunk group".into(), Box::new(move || root("usermod", &["-aG", "punktfunk", &user]).map(drop))));
     }
     steps.push((format!("Installing plugover {VERSION}"), Box::new(|| install_self(&host_bin(), false))));
@@ -478,8 +523,12 @@ fn plan_host(found: &Found) -> Result<Plan> {
         Box::new(|| wait_for("the host daemon", || crate::hostd::call(&crate::endpoint(), &crate::hostd::Request::Status).is_ok())),
     ));
 
-    let after: Action = Box::new(|| {
+    let after: Action = Box::new(move || {
         crate::doctor::checks(&crate::endpoint(), &crate::config_dir().join("host.toml"), &crate::relay_state());
+        if join_group {
+            // The service manager keeps the groups it started with.
+            warn("Log out and back in before you stream", "the new group applies only to a new login", Some("until then devices cannot be plugged in here"));
+        }
         let bin_dir = host_bin().parent().map(Path::to_path_buf).unwrap_or_default();
         if !std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|p| p == bin_dir) {
             warn(&format!("{} is not on your PATH", bin_dir.display()), "add it to run plugover from a terminal", None);
@@ -512,38 +561,50 @@ fn add_plugin() -> Result<()> {
 // --- Uninstall ---------------------------------------------------------------------------------
 
 fn plan_uninstall(found: &Found, ctx: &Ctx) -> Result<Plan> {
-    anyhow::ensure!(found.relay.is_some() || found.host.is_some(), "Plugover is not installed here");
+    let (relay, host) = ctx.removing(found)?;
     let mut lines = Vec::new();
-    if found.relay.is_some() {
+    if relay {
         lines.push(line(Mark::Todo, "Remove the relay", "service, binary, module setting and firewall rules"));
     }
-    if found.host.is_some() {
+    if host {
         lines.push(line(Mark::Todo, "Remove the host", "service, binary and console plugin"));
+    }
+    // What stays, so removing one role of two is not a surprise.
+    for (kept, what) in [(found.relay.is_some() && !relay, "relay"), (found.host.is_some() && !host, "host")] {
+        if kept {
+            lines.push(line(Mark::Ok, format!("Keep the {what}"), "still installed"));
+        }
     }
     let purge = ctx.args.purge || (!ctx.args.yes && ctx.interactive && ctx.confirm("Also delete pairings and settings?", false)?);
     if purge {
         lines.push(line(Mark::Todo, "Delete pairings and settings", "you pair again after reinstalling"));
     }
     let mut steps: Vec<(String, Action)> = Vec::new();
-    if found.relay.is_some() {
+    if relay {
         steps.push(("Removing the relay".into(), Box::new(move || remove_relay(purge))));
     }
-    if found.host.is_some() {
+    if host {
         steps.push(("Removing the host".into(), Box::new(move || remove_host(purge))));
     }
-    let after: Action = Box::new(|| {
-        println!("  {} {}", paint(GOOD.bold(), "Plugover is gone."), paint(DIM, "The usbip kernel modules stay; they come with your kernel."));
+    let everything = relay == found.relay.is_some() && host == found.host.is_some();
+    let after: Action = Box::new(move || {
+        let done = if everything { "Plugover is gone." } else if relay { "The relay is gone." } else { "The host is gone." };
+        println!("  {} {}", paint(GOOD.bold(), done), paint(DIM, "The usbip kernel modules stay; they come with your kernel."));
         Ok(())
     });
-    Ok(Plan { lines, steps, root: found.relay.is_some(), after })
+    Ok(Plan { lines, steps, root: relay, after })
 }
 
 fn remove_relay(purge: bool) -> Result<()> {
     // A package's binary stays for the package manager to remove.
     let ours = unit_bin(Path::new(RELAY_UNIT)).is_some_and(|b| b == Path::new(RELAY_BIN));
     let _ = root("systemctl", &["disable", "--now", "plugover-relay"]);
-    close_firewall()?;
-    root("rm", &["-f", RELAY_UNIT, MODULES])?;
+    // A firewall that has gone away since should not leave the rest half removed.
+    if let Err(e) = close_firewall() {
+        warn("Could not remove the firewall rules", format!("{e:#}"), Some(&format!("remove the ones for TCP {PORT} by hand")));
+    }
+    root("rm", &["-f", RELAY_UNIT, &modules_file("usbip-host"), &format!("{NFT_CONF}.plugover-backup")])?;
+    forget_old_module("usbip-host")?;
     if ours {
         root("rm", &["-f", RELAY_BIN])?;
     }
@@ -588,11 +649,16 @@ mod tests {
     #[test]
     fn nft_rules_go_right_after_the_input_hook() {
         let conf = "table inet filter {\n  chain input {\n    type filter hook input priority 0; policy drop;\n    ct state established accept\n  }\n}\n";
-        let out = with_nft_rules(conf, "192.168.1.0/24").unwrap();
+        let out = with_nft_rules(conf, &["192.168.1.0/24".into()]).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert!(lines[3].contains("tcp dport 7275 ip saddr 192.168.1.0/24 accept comment \"plugover\""), "{out}");
         assert!(lines[4].contains("udp dport 5353"));
         assert_eq!(lines[5].trim(), "ct state established accept");
-        assert!(with_nft_rules("table inet filter {}\n", "x").is_none());
+        assert!(with_nft_rules("table inet filter {}\n", &["x".into()]).is_none());
+        let other = format!("table ip mangle {{\n  chain input {{\n    type filter hook input priority -150;\n  }}\n}}\n{conf}");
+        let out = with_nft_rules(&other, &["192.168.1.0/24".into(), "10.0.0.0/8".into()]).unwrap();
+        assert!(out.lines().nth(2).is_some_and(|l| !l.contains("plugover")), "not into another table: {out}");
+        assert!(out.lines().nth(8).is_some_and(|l| l.contains("tcp dport 7275")), "{out}");
+        assert!(out.lines().nth(10).is_some_and(|l| l.contains("tcp dport 7275 ip saddr 10.0.0.0/8")), "both networks: {out}");
     }
 }

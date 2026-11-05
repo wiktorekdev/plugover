@@ -111,6 +111,12 @@ pub struct PairedRelay {
     /// Our id towards this relay.
     pub host_id: String,
     pub key: String,
+    /// The relay has encrypted before (or said it can when pairing), so it must from now on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub encrypts: bool,
+    /// You allowed connecting without encryption, to a relay that cannot encrypt.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unencrypted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,7 +178,11 @@ pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    opts.open(&tmp)?.write_all(toml::to_string_pretty(value)?.as_bytes())?;
+    let mut file = opts.open(&tmp)?;
+    // `mode` only applies to a new file; one left over from an older run may be looser.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(toml::to_string_pretty(value)?.as_bytes())?;
     fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
 }
 
@@ -200,6 +210,8 @@ mod tests {
                 address: "192.168.1.50:7275".into(),
                 host_id: "01".into(),
                 key: "00".repeat(32),
+                encrypts: true,
+                unencrypted: false,
             }],
             auto: vec![AutoRule { relay: "ab".into(), device: "046d:c24f".into(), title: Some("Logitech G29".into()), port: None }],
             label: Vec::new(),

@@ -8,8 +8,12 @@ use std::io::{self, BufRead, Read, Write};
 pub const DEFAULT_PORT: u16 = 7275;
 /// Lend one device: challenge, then a USB/IP import.
 pub const DATA: &[u8; 4] = b"PLG1";
+/// The same, and everything after the import request is encrypted (`tls`). Since 0.6.
+pub const DATA_ENCRYPTED: &[u8; 4] = b"PLG2";
 /// Device list and its changes, as JSON lines.
 pub const CONTROL: &[u8; 4] = b"PLC1";
+/// The same, encrypted after the challenge. Since 0.6.
+pub const CONTROL_ENCRYPTED: &[u8; 4] = b"PLC2";
 /// Pair a new host with the code the relay printed.
 pub const PAIR: &[u8; 4] = b"PLP2";
 pub const CONTROL_CONTEXT: &str = "control";
@@ -37,12 +41,45 @@ pub fn send<T: Serialize>(w: &mut impl Write, msg: &T) -> io::Result<()> {
     w.write_all(&line)
 }
 
-pub fn recv<T: DeserializeOwned>(r: &mut impl BufRead) -> io::Result<T> {
+/// Longest line anyone sends; a snapshot of a busy relay is a few KiB. Stops a peer from
+/// growing our memory with a line that never ends.
+const MAX_LINE: u64 = 1 << 20;
+
+/// One line without its newline; `None` at the end of the stream.
+pub fn read_line(r: &mut impl BufRead) -> io::Result<Option<String>> {
     let mut line = String::new();
-    if r.read_line(&mut line)? == 0 {
-        return Err(io::ErrorKind::UnexpectedEof.into());
+    if r.take(MAX_LINE).read_line(&mut line)? == 0 {
+        return Ok(None);
     }
+    if !line.ends_with('\n') && line.len() as u64 >= MAX_LINE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
+    }
+    Ok(Some(line))
+}
+
+pub fn recv<T: DeserializeOwned>(r: &mut impl BufRead) -> io::Result<T> {
+    let line = read_line(r)?.ok_or(io::ErrorKind::UnexpectedEof)?;
     serde_json::from_str(&line).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Sent by the host on the control channel to time the link; the relay answers with `Pong`.
+/// Relays before 0.5.1 never read the channel and do not answer.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Ping {
+    pub ping: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Pong {
+    pub pong: u64,
+}
+
+/// What the relay sends on the control channel.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum FromRelay {
+    Pong(Pong),
+    Snapshot(Snapshot),
 }
 
 /// Pairing, as JSON lines: hello, the relay's SPAKE2 answer, the host proves it has the code,
@@ -65,7 +102,14 @@ pub struct PairConfirm {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum PairReply {
-    Pake { relay_id: String, relay: String, pake: String },
+    Pake {
+        relay_id: String,
+        relay: String,
+        pake: String,
+        /// Plugover on the relay; relays before 0.6 send none, and cannot encrypt.
+        #[serde(default)]
+        version: String,
+    },
     Paired { tag: String },
     Refused { reason: String },
 }
@@ -91,6 +135,9 @@ pub struct Snapshot {
     /// Plugover version on the relay; empty before 0.5.
     #[serde(default)]
     pub version: String,
+    /// Came over an encrypted channel; set by the host, not sent.
+    #[serde(skip)]
+    pub encrypted: bool,
 }
 
 #[cfg(test)]
@@ -106,5 +153,22 @@ mod tests {
         assert!(matches!(recv(&mut r).unwrap(), PairReply::Paired { tag } if tag == "ab"));
         assert!(matches!(recv(&mut r).unwrap(), PairReply::Refused { .. }));
         assert_eq!(recv::<PairReply>(&mut r).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn endless_lines_are_refused() {
+        let flood = vec![b'x'; MAX_LINE as usize + 10];
+        assert_eq!(recv::<Ping>(&mut io::BufReader::new(&flood[..])).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn pongs_and_snapshots_tell_apart() {
+        let snap = Snapshot { relay_id: "r".into(), relay: "rig".into(), devices: vec![], version: "0.5.1".into(), encrypted: false };
+        let mut buf = Vec::new();
+        send(&mut buf, &Pong { pong: 7 }).unwrap();
+        send(&mut buf, &snap).unwrap();
+        let mut r = io::BufReader::new(&buf[..]);
+        assert!(matches!(recv(&mut r).unwrap(), FromRelay::Pong(Pong { pong: 7 })));
+        assert!(matches!(recv(&mut r).unwrap(), FromRelay::Snapshot(s) if s == snap));
     }
 }

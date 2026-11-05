@@ -22,8 +22,8 @@ struct Entry {
     bus_id: Option<String>,
     #[serde(rename = "ClientIPAddress")]
     client: Option<String>,
-    #[serde(rename = "Description")]
-    description: String,
+    #[serde(rename = "Description", default)]
+    description: Option<String>,
     #[serde(rename = "InstanceId")]
     instance_id: String,
     #[serde(rename = "PersistedGuid")]
@@ -51,7 +51,9 @@ fn vid_pid(instance_id: &str) -> Option<(u16, u16)> {
 /// Devices plugged in right now, from `usbipd state`.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn parse(json: &str) -> Result<Vec<Device>> {
-    let state: State = serde_json::from_str(json).context("unexpected `usbipd state` output")?;
+    let state: State = serde_json::from_str(json).with_context(|| {
+        format!("unexpected `usbipd state` output (is usbipd-win 4 or newer installed?): {}", json.trim().chars().take(200).collect::<String>())
+    })?;
     Ok(state
         .devices
         .into_iter()
@@ -59,10 +61,12 @@ pub fn parse(json: &str) -> Result<Vec<Device>> {
             // Unplugged devices have no bus id; devices behind odd hubs get "IncompatibleHub".
             let busid = e.bus_id.filter(|b| b.contains('-'))?;
             let (vid, pid) = vid_pid(&e.instance_id)?;
-            let (busnum, devnum) = busid.split_once('-').and_then(|(b, p)| Some((b.parse().ok()?, p.parse().ok()?)))?;
+            // Only the bus id matters to usbipd; the numbers are informational.
+            let (busnum, devnum) = busid.split_once('-').and_then(|(b, p)| Some((b.parse().ok()?, p.parse().ok()?))).unwrap_or((0, 0));
+            let description = e.description.unwrap_or_else(|| "USB device".into());
             // ponytail: usbipd reports no USB classes, so hubs and storage are recognised by the
             // Windows device names; read the class through SetupAPI if a device slips through.
-            let d = e.description.to_lowercase();
+            let d = description.to_lowercase();
             let class = if d.contains("usb hub") { 0x09 } else { 0 };
             let storage = d.contains("mass storage") || d.contains("disk drive") || d.contains("uasp");
             let interfaces = if storage { vec![Interface { class: 0x08, subclass: 0, protocol: 0, hid: None, net: false }] } else { Vec::new() };
@@ -83,7 +87,7 @@ pub fn parse(json: &str) -> Result<Vec<Device>> {
                     config_value: 0,
                     num_configs: 0,
                     manufacturer: None,
-                    product: Some(e.description),
+                    product: Some(description),
                     driver: None,
                     interfaces,
                     busid,
@@ -96,11 +100,11 @@ pub fn parse(json: &str) -> Result<Vec<Device>> {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use crate::{net, usbip};
+    use crate::{net, tls, usbip};
     use anyhow::bail;
     use std::{
         env, io,
-        net::{Shutdown, TcpStream},
+        net::TcpStream,
         os::windows::process::CommandExt,
         path::PathBuf,
         process::Command,
@@ -135,8 +139,9 @@ mod imp {
         parse(&run(&["state"])?)
     }
 
-    /// Serves one import that already passed Plugover's challenge, until either side hangs up.
-    pub fn lend(mut host: TcpStream, dev: &Device) -> Result<()> {
+    /// Serves one import that already passed Plugover's challenge, until either side hangs up;
+    /// through `crypt` when the host encrypts.
+    pub fn lend(host: TcpStream, dev: &Device, crypt: Option<(tls::Reader<TcpStream>, tls::Writer<TcpStream>)>) -> Result<()> {
         let busid = dev.dev.busid.as_str();
         if !dev.bound {
             run(&["bind", "--busid", busid])?;
@@ -146,20 +151,23 @@ mod imp {
             io::Write::write_all(&mut up, &usbip::import_request(busid))?;
             net::tune(&up)?;
             net::tune(&host)?;
-            let (mut host_w, mut up_r) = (host.try_clone()?, up.try_clone()?);
-            let back = thread::spawn(move || {
-                let _ = io::copy(&mut up_r, &mut host_w);
-                let _ = host_w.shutdown(Shutdown::Both);
-            });
-            let _ = io::copy(&mut host, &mut up);
-            let _ = up.shutdown(Shutdown::Both);
-            let _ = back.join();
+            match crypt {
+                Some((r, w)) => net::pump(up, host, r, w)?,
+                None => net::pump(up, host.try_clone()?, host.try_clone()?, host)?,
+            }
             Ok(())
         })();
         if !dev.bound {
-            // Gives the device back to Windows the way it was.
-            if let Err(e) = run(&["unbind", "--busid", busid]) {
-                eprintln!("could not unbind {busid}: {e:#}");
+            // Gives the device back to Windows the way it was. Right after the connection closes
+            // usbipd may still be letting go of it, so try a few times.
+            let mut tries = 0;
+            while let Err(e) = run(&["unbind", "--busid", busid]) {
+                tries += 1;
+                if tries == 5 {
+                    eprintln!("could not unbind {busid}: {e:#}");
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(300));
             }
         }
         result
@@ -183,12 +191,16 @@ mod tests {
               "InstanceId": "USB\\VID_0BC2&PID_AB24\\NA8B", "IsForced": false, "PersistedGuid": "7d3c...", "StubInstanceId": null },
             { "BusId": null, "ClientIPAddress": null, "Description": "Gone",
               "InstanceId": "USB\\VID_1234&PID_0001\\X", "IsForced": false, "PersistedGuid": null, "StubInstanceId": null },
+            { "BusId": "2-11", "ClientIPAddress": null, "Description": null,
+              "InstanceId": "USB\\VID_1234&PID_0003\\Z", "IsForced": false, "PersistedGuid": null, "StubInstanceId": null },
             { "BusId": "IncompatibleHub", "ClientIPAddress": null, "Description": "Behind a hub",
               "InstanceId": "USB\\VID_1234&PID_0002\\Y", "IsForced": false, "PersistedGuid": null, "StubInstanceId": null }
           ]
         }"#;
         let devs = parse(json).unwrap();
-        assert_eq!(devs.len(), 2, "unplugged and incompatible devices are skipped");
+        assert_eq!(devs.len(), 3, "unplugged and incompatible devices are skipped");
+        assert_eq!((devs[2].dev.busnum, devs[2].dev.devnum, devs[2].dev.product.as_deref()), (2, 11, Some("USB device")));
+        assert!(parse("Usage: usbipd").err().is_some_and(|e| e.to_string().contains("Usage: usbipd")), "the output says what went wrong");
         assert_eq!((devs[0].dev.busid.as_str(), devs[0].dev.vid, devs[0].dev.pid), ("1-2", 0x046d, 0xc24f));
         assert!(!devs[0].attached && !devs[0].bound);
         assert!(devs[1].attached && devs[1].bound);
