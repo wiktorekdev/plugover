@@ -616,6 +616,16 @@ function DeviceRow({
 					</div>
 					{d.error && !busy && <p className="mt-1 break-words text-sm text-destructive">Could not connect: {d.error}</p>}
 				</div>
+				{d.state === "elsewhere" && d.lent_to !== "another USB/IP client" && (
+					<Button
+						size="sm"
+						variant="secondary"
+						disabled={busy !== undefined}
+						onClick={() => run("attach", { busid: d.busid, take: true }, `${d.title} is here now`, "Taking over…")}
+					>
+						Take over
+					</Button>
+				)}
 				<Switch
 					className={OFF_RING}
 					checked={d.auto}

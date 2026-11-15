@@ -17,6 +17,10 @@ pub const CONTROL_ENCRYPTED: &[u8; 4] = b"PLC2";
 /// Pair a new host with the code the relay printed.
 pub const PAIR: &[u8; 4] = b"PLP2";
 pub const CONTROL_CONTEXT: &str = "control";
+/// One request from a host, answered, then the connection ends. Encrypted after the challenge.
+/// Since 0.7; older relays hang up.
+pub const REQUEST: &[u8; 4] = b"PLR1";
+pub const REQUEST_CONTEXT: &str = "request";
 /// Sent instead of a nonce to a host the relay does not know (never paired, or unpaired since).
 /// Older hosts just fail the challenge with it.
 pub const UNPAIRED: &[u8; 32] = b"plugover: this host is unpaired.";
@@ -72,6 +76,21 @@ pub struct Ping {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Pong {
     pub pong: u64,
+}
+
+/// What a host may ask a relay on the request channel.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum RelayRequest {
+    /// Take the device back from the host that has it and keep it for this one for a few seconds.
+    Take { busid: String },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RelayReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// What the relay sends on the control channel.

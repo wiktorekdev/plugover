@@ -116,6 +116,10 @@ enum Cmd {
     Attach {
         /// Its port on the relay, the second column of `plugover status` (such as 1-4).
         busid: String,
+        /// Take it over from another host that has it (it goes back there when you let go,
+        /// if that host wants it).
+        #[arg(long)]
+        take: bool,
         /// Which relay, by name or id; needed only when several are paired.
         #[arg(long)]
         relay: Option<String>,
@@ -401,8 +405,8 @@ fn run(cli: Cli) -> Result<()> {
                 eprintln!("plugover: {e:#}");
             }
         }
-        Cmd::Attach { busid, relay } => {
-            let v = call(Request::Attach { relay, busid: busid.clone() })?;
+        Cmd::Attach { busid, relay, take } => {
+            let v = call(Request::Attach { relay, busid: busid.clone(), take })?;
             done(format!("Connected {} (virtual port {}).", paint(BOLD, busid), v["port"]));
         }
         Cmd::Detach { busid, relay } => {

@@ -67,7 +67,13 @@ pub enum Request {
         #[serde(default)]
         kind: Option<catalog::Kind>,
     },
-    Attach { relay: Option<String>, busid: String },
+    /// Plug a device in now; with `take`, first take it over from the host that has it.
+    Attach {
+        relay: Option<String>,
+        busid: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        take: bool,
+    },
     Detach { relay: Option<String>, busid: String },
     /// Allows connecting a relay's devices without encryption, for a relay too old to encrypt.
     Unencrypted { relay: String, on: bool },
@@ -660,8 +666,11 @@ impl Daemon {
                 self.save(&cfg)?;
                 json!({ "ok": true })
             }
-            Request::Attach { relay, busid } => {
+            Request::Attach { relay, busid, take } => {
                 let relay = self.pick(relay.as_deref())?;
+                if take {
+                    host::request(&relay, &proto::RelayRequest::Take { busid: busid.clone() })?;
+                }
                 let _pass = self.reconciling.lock().unwrap();
                 let a = vhci::attach(&self.sys, &relay, &busid, self.encryption(&relay)?)?;
                 let port = a.port;

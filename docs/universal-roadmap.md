@@ -435,7 +435,16 @@ hardware and recorded in the README compatibility tables.
   exit 0 with the daemon down). Not verified: any real Sunshine-family app, Windows, the Flatpak.
 - Not covered: Moonshine and Wolf (no prep commands), Rubylight (Rust rewrite; its API not read).
 
-**Phase 3: reliability**
+**Phase 3: reliability** (take-over done in the working tree, not released)
+- Done: "take over". A new request channel (`PLR1`, encrypted after the challenge; older relays
+  hang up and the host says to update) carries `take`. The relay revokes the other host's lend
+  through the same path as unpairing, waits until it is back, and keeps the device for the taking
+  host for 15 s (shown as that host's in snapshots, refused to others). `plugover attach --take`
+  and a **Take over** button. Tested with two hosts against a real relay in `cargo test`; not with
+  real hardware.
+- Not done, on purpose: the serial-number guard on following. If a wheel changes its serial when it
+  switches modes, the guard would stop the G29 following that works today; check on hardware first.
+  Relay stuck-device recovery waits for a real report of a stuck device.
 - Also from Phase 1 and 2: `sources` scoping on rules, and a narrower Windows token if elevated
   prep commands turn out not to reach the daemon.
 - Serial-number following, relay stuck-device recovery, relay "take over" request, doctor checks

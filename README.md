@@ -122,6 +122,9 @@ streams; otherwise it stays connected. A device's details let you:
 - keep auto-connect to one port, when two of the same model are plugged in,
 - fix a wrong name or device kind.
 
+A device another host has shows **Take over**: the relay takes it back from that host and keeps it
+for this one. Both hosts need Plugover 0.7 or newer on the relay.
+
 If a device cannot connect, its row says why.
 
 Everything also works from a terminal on the host:
@@ -135,6 +138,7 @@ plugover auto 046d:c24f on --mode always # stay connected, stream or not (also: 
 plugover ui                              # open the Plugover page in a browser
 plugover session start --source myapp    # tell Plugover a stream started (stop when it ends)
 plugover attach 1-2                      # connect a device now (plugover detach 1-2 to give it back)
+plugover attach 1-2 --take               # take it over from another host that has it
 plugover label 0fd9:0080 --name "Stream Deck" --kind other   # fix a name or kind
 plugover forget simrig                   # remove a relay
 plugover unencrypted simrig on           # connect a relay too old to encrypt anyway (see Security)

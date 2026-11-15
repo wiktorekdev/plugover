@@ -50,7 +50,12 @@ struct Lend {
     /// Our end of the host's connection, closed to take the device back (Windows).
     #[cfg_attr(target_os = "linux", allow(dead_code))]
     conn: Option<TcpStream>,
+    /// Another host took it over; `tend` takes it back.
+    taken: bool,
 }
+
+/// How long a device taken over waits for the host that took it.
+const PROMISE: Duration = Duration::from_secs(15);
 
 pub struct Relay {
     sys: PathBuf,
@@ -63,6 +68,8 @@ pub struct Relay {
     known: Mutex<HashMap<(String, u16, u16), Identity>>,
     /// busid -> who has it.
     lent: Mutex<HashMap<String, Lend>>,
+    /// busid -> the host that took it over (id, name), and when; others may not have it meanwhile.
+    promised: Mutex<HashMap<String, (String, String, Instant)>>,
     /// When, and at which `changes` count, the last scan ran.
     scanned: Mutex<Option<(Instant, u64, Vec<Device>)>>,
     /// Bumped on every USB uevent; `None` while nothing watches them, so everything polls.
@@ -86,6 +93,7 @@ impl Relay {
             ids: UsbIds::load(),
             known: Mutex::default(),
             lent: Mutex::default(),
+            promised: Mutex::default(),
             scanned: Mutex::default(),
             changes: Mutex::default(),
             changed: Condvar::new(),
@@ -156,6 +164,7 @@ impl Relay {
             proto::CONTROL => self.control(s, false),
             proto::CONTROL_ENCRYPTED => self.control(s, true),
             proto::PAIR => self.pair(s),
+            proto::REQUEST => self.request(s),
             _ => bail!("not a Plugover host"),
         }
     }
@@ -305,10 +314,54 @@ impl Relay {
         }
         let mut lent = self.lent.lock().unwrap();
         ensure!(!dev.attached && !lent.contains_key(busid), "{busid} is already in use");
+        let mut promised = self.promised.lock().unwrap();
+        if let Some((id, name, at)) = promised.get(busid)
+            && at.elapsed() < PROMISE
+            && *id != host.id
+        {
+            bail!("{busid} was just taken over by {name}");
+        }
+        promised.remove(busid);
         let windows = cfg!(windows);
         let conn = if windows { Some(s.try_clone()?) } else { None };
-        lent.insert(busid.into(), Lend { host_id: host.id.clone(), host: host.name.clone(), live: windows, conn });
+        lent.insert(busid.into(), Lend { host_id: host.id.clone(), host: host.name.clone(), live: windows, conn, taken: false });
         Ok(dev)
+    }
+
+    /// One request from a paired host, on its own encrypted connection.
+    fn request(&self, mut s: TcpStream) -> Result<()> {
+        let (host, nonce) = self.challenge(&mut s)?;
+        let mut tag = [0u8; auth::TAG_LEN];
+        s.read_exact(&mut tag)?;
+        let key = state::decode_key(&host.key)?;
+        ensure!(auth::verify(&key, &nonce, proto::REQUEST_CONTEXT, &tag), "{} failed the challenge", host.name);
+        let (r, mut w) = tls::wrap(s.try_clone()?, s.try_clone()?, &key, &nonce, true);
+        let result = match proto::recv(&mut BufReader::new(r))? {
+            proto::RelayRequest::Take { busid } => self.take(&busid, &host),
+        };
+        let reply = proto::RelayReply { ok: result.is_ok(), error: result.as_ref().err().map(|e| format!("{e:#}")) };
+        proto::send(&mut w, &reply)?;
+        result
+    }
+
+    /// Takes a device back from the host that has it, for `host`, and waits until it is back.
+    fn take(&self, busid: &str, host: &PairedHost) -> Result<()> {
+        {
+            let mut lent = self.lent.lock().unwrap();
+            let l = lent.get_mut(busid).with_context(|| format!("no host has {busid} from {}", self.name))?;
+            ensure!(l.host_id != host.id, "{} has {busid} already", host.name);
+            eprintln!("{} takes {busid} over from {}", host.name, l.host);
+            l.taken = true;
+        }
+        self.promised.lock().unwrap().insert(busid.into(), (host.id.clone(), host.name.clone(), Instant::now()));
+        for _ in 0..30 {
+            self.tend();
+            if !self.lent.lock().unwrap().contains_key(busid) {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        bail!("{busid} did not come back from the host that had it")
     }
 
     fn control(&self, mut s: TcpStream, encrypted: bool) -> Result<()> {
@@ -359,7 +412,13 @@ impl Relay {
     }
 
     fn snapshot(&self, st: &RelayState) -> Result<Snapshot> {
-        let lent: HashMap<String, String> = self.lent.lock().unwrap().iter().map(|(b, l)| (b.clone(), l.host.clone())).collect();
+        let mut lent: HashMap<String, String> = self.lent.lock().unwrap().iter().map(|(b, l)| (b.clone(), l.host.clone())).collect();
+        // A device taken over shows as the new host's while it waits for it, so others leave it.
+        for (busid, (_, name, at)) in self.promised.lock().unwrap().iter() {
+            if at.elapsed() < PROMISE {
+                lent.entry(busid.clone()).or_insert_with(|| name.clone());
+            }
+        }
         let mut known = self.known.lock().unwrap();
         let devices = self
             .devices()?
@@ -451,10 +510,11 @@ impl Relay {
         // Unreadable state revokes nothing: a broken file should not unplug anyone's wheel.
         let paired: Option<Vec<String>> = self.state().ok().map(|st| st.hosts.into_iter().map(|h| h.id).collect());
         self.lent.lock().unwrap().retain(|busid, l| {
-            let revoked = l.live && paired.as_ref().is_some_and(|p| !p.contains(&l.host_id));
-            if revoked {
+            let unpaired = l.live && paired.as_ref().is_some_and(|p| !p.contains(&l.host_id));
+            if unpaired {
                 eprintln!("{} was unpaired; taking {busid} back", l.host);
             }
+            let revoked = unpaired || (l.live && l.taken);
             self.keep(busid, l, revoked)
         });
     }
@@ -640,6 +700,69 @@ mod tests {
     }
 
     /// A relay before 0.6: hangs up on the encrypted channels and passes the rest to `real`.
+    #[test]
+    fn a_host_takes_a_device_over_and_the_relay_keeps_it_for_it() {
+        let root = std::env::temp_dir().join(format!("plugover-relay-take-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dev = root.join("sys/bus/usb/devices/1-2");
+        fs::create_dir_all(&dev).unwrap();
+        for (f, v) in [("busnum", "1"), ("devnum", "5"), ("speed", "12"), ("idVendor", "046d"), ("idProduct", "c24f")] {
+            fs::write(dev.join(f), v).unwrap();
+        }
+        let host = |n: u8, name: &str| PairedHost { id: hex::encode([n; 8]), name: name.into(), key: hex::encode([n; 32]) };
+        let (desktop, laptop) = (host(1, "desktop"), host(2, "laptop"));
+        let st = RelayState { id: "r1".into(), share: None, hosts: vec![desktop.clone(), laptop.clone()] };
+        state::save(&root.join("relay.toml"), &st).unwrap();
+        let relay = Arc::new(Relay::open(root.join("sys"), root.join("relay.toml")).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let server = relay.clone();
+        thread::spawn(move || server.accept(listener));
+        let paired = |h: &PairedHost| PairedRelay {
+            id: "r1".into(),
+            name: "relay".into(),
+            address: address.clone(),
+            host_id: h.id.clone(),
+            key: h.key.clone(),
+            encrypts: true,
+            unencrypted: false,
+        };
+        let take = |h: &PairedHost| host::request(&paired(h), &proto::RelayRequest::Take { busid: "1-2".into() });
+
+        // The desktop has the wheel; the laptop takes it over.
+        relay.lent.lock().unwrap().insert(
+            "1-2".into(),
+            Lend { host_id: desktop.id.clone(), host: desktop.name.clone(), live: true, conn: None, taken: false },
+        );
+        assert!(format!("{:#}", take(&desktop).unwrap_err()).contains("has 1-2 already"));
+        take(&laptop).unwrap();
+        assert!(relay.lent.lock().unwrap().is_empty(), "the desktop lost it");
+        assert!(format!("{:#}", take(&desktop).unwrap_err()).contains("no host has 1-2"), "nothing to take back now");
+
+        // Meanwhile it shows as the laptop's, and only the laptop may have it.
+        let mut seen = None;
+        host::watch(&paired(&desktop), |snap| { seen = Some(snap); false }, |_| {}).unwrap();
+        assert_eq!(seen.unwrap().devices[0].lent_to.as_deref(), Some("laptop"));
+        let (a, _b) = net::loopback().unwrap();
+        let Err(err) = relay.reserve("1-2", &desktop, &a) else { panic!("the desktop got it back") };
+        assert!(format!("{err:#}").contains("taken over by laptop"), "{err:#}");
+        relay.reserve("1-2", &laptop, &a).unwrap();
+        assert!(relay.promised.lock().unwrap().is_empty(), "the promise is kept");
+
+        // A relay before 0.7 hangs up on the request.
+        let old = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut too_old = paired(&laptop);
+        too_old.address = old.local_addr().unwrap().to_string();
+        thread::spawn(move || {
+            for mut c in old.incoming().flatten() {
+                let _ = c.read_exact(&mut [0u8; 4]);
+            }
+        });
+        let err = host::request(&too_old, &proto::RelayRequest::Take { busid: "1-2".into() }).unwrap_err();
+        assert!(format!("{err:#}").contains("older than 0.7"), "{err:#}");
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn old_relay(real: String) -> String {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = l.local_addr().unwrap().to_string();
