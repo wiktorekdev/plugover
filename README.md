@@ -1,309 +1,179 @@
 # Plugover
 
-Use the racing wheel, pedals or controllers plugged into one computer on a gaming PC somewhere
-else on your network, the one you stream games from with
-[punktfunk](https://git.unom.io/unom/punktfunk), Sunshine or one of its forks, or anything else.
+Plug your wheel, pedals or controller into the computer next to you and play with it on a gaming
+PC elsewhere in the house, the one you stream from.
 
-Plugover forwards the real USB device over USB/IP, not an emulated gamepad, so force feedback and
-vendor features work as if the device were plugged into the gaming PC. With punktfunk or a
-Sunshine-family host, devices connect when a stream starts and go back when it ends; without one
-they stay connected.
+Plugover forwards the real USB device over your network (USB/IP), so force feedback and vendor
+features keep working. Devices connect when a stream starts and go back when it ends.
 
 ![The Plugover page in the punktfunk console](docs/img/console.png)
 
-Everything between the two machines is encrypted, and only computers you paired with a one-time
-code can connect.
-
-## How it fits together
-
 ```mermaid
 flowchart LR
-    devices["Wheel, pedals, shifter"] -- USB --> relay["<b>Relay</b><br>PC or Raspberry Pi<br>next to you"]
-    relay -- "USB/IP over<br>your network" --> host["<b>Host</b><br>gaming PC<br>running punktfunk"]
-    host -- "game stream" --> client["Client<br>TV, laptop, handheld"]
+    devices["Wheel, pedals, pad"] -- USB or Bluetooth --> relay["<b>Relay</b><br>PC or Raspberry Pi<br>next to you"]
+    relay -- "your network" --> host["<b>Host</b><br>gaming PC"]
+    host -- "game stream" --> client["TV, laptop, handheld"]
 ```
 
-- The **relay** is the machine the devices are plugged into, usually next to the screen you stream
-  to.
-- The **host** is the gaming PC running punktfunk. Games there see the devices as if they were
-  plugged in locally.
-
-## Requirements
-
-| | Relay | Host |
-|---|---|---|
-| **Linux** (x86_64, ARM64, ARMv7) | systemd, the `usbip-host` kernel module | systemd, the `vhci-hcd` kernel module |
-| **Windows** (10 or 11, x64) | administrator rights; setup installs [usbipd-win](https://github.com/dorssel/usbipd-win) | administrator rights; setup installs [usbip-win2](https://github.com/vadimgrn/usbip-win2) |
-
-Most Linux distributions ship both kernel modules. If setup says one is missing, install your
-distribution's extra kernel modules (on Ubuntu: `linux-modules-extra-$(uname -r)`). Setup also loads
-the kernel's `tls` module where there is one, so the kernel encrypts USB traffic; without it,
-Plugover does that itself.
-
-Both machines must be on the same network. The relay listens on TCP 7275 and announces itself over
-mDNS (UDP 5353); setup opens both in the firewall for your network.
+The **relay** is the machine the devices are plugged into. The **host** is the gaming PC, where
+games see them as local devices.
 
 ## Install
 
-Run the installer on the relay first, then on the host.
-
-**Linux**, as your normal user (it asks for sudo only for the steps that need root):
+Run the installer on the relay first, then on the host, and pick the role when it asks.
 
 ```sh
+# Linux, as your normal user
 curl -fsSL https://github.com/wiktorekdev/plugover/releases/latest/download/installer.sh | sh
 ```
 
-**Windows**, in PowerShell (it asks for administrator rights):
-
 ```powershell
+# Windows, in PowerShell
 irm https://github.com/wiktorekdev/plugover/releases/latest/download/installer.ps1 | iex
 ```
 
-The installer shows its plan before changing anything and installs only what is missing.
-
-1. **On the relay**, pick **Relay**. At the end it prints a six-digit pairing code.
-2. **On the host**, pick **Host**.
-3. **Pair.** Open the punktfunk console, go to **Plugover**, choose the relay and enter the code.
-4. **Pick devices.** Turn on the ones you want. They connect whenever a stream runs; turning one off
-   hands it back right away.
+The relay prints a six-digit code at the end. Enter it on the host: in the punktfunk console under
+**Plugover**, on the page `plugover ui` opens, or with `plugover pair`. Then turn on the devices you
+want.
 
 ![Entering the pairing code](docs/img/pairing.png)
 
-Lost the code? Run `sudo plugover code` on the relay (`plugover code` as administrator on Windows)
-for a new one. A code works once, for 15 minutes.
+Need a new code? Run `sudo plugover code` on the relay. A code works once, for 15 minutes.
 
-### Other ways to install
+<details>
+<summary>Requirements and other ways to install</summary>
 
-- **Binary.** Download the file for your system from the
-  [latest release](https://github.com/wiktorekdev/plugover/releases/latest) and run
-  `plugover setup`, or double-click the `.exe` on Windows. The installer scripts do the same after
-  checking the download against `SHA256SUMS`.
-- **Debian package.** On Debian, Ubuntu and Raspberry Pi OS:
-  `sudo apt install ./plugover_<version>_<arch>.deb`, then `plugover setup`. The package installs
-  only the `plugover` command.
-- **Without questions**, for scripts: pass the role and `--yes`.
+| | Relay | Host |
+|---|---|---|
+| **Linux** (x86_64, ARM64, ARMv7) | systemd, `usbip-host` module | systemd, `vhci-hcd` module |
+| **Windows** 10 or 11, x64 | admin rights; installs [usbipd-win](https://github.com/dorssel/usbipd-win) | admin rights; installs [usbip-win2](https://github.com/vadimgrn/usbip-win2) |
 
-  ```sh
-  curl -fsSL https://github.com/wiktorekdev/plugover/releases/latest/download/installer.sh | sh -s -- --relay --lan 192.168.1.0/24,10.0.0.0/24 --yes
-  plugover setup --host --yes
-  ```
+Most distributions ship both modules; on Ubuntu they are in `linux-modules-extra-$(uname -r)`.
+The relay listens on TCP 7275 and announces itself over mDNS (UDP 5353); setup opens both for your
+network.
 
-### Update and uninstall
+- **Binary:** download it from the [latest release](https://github.com/wiktorekdev/plugover/releases/latest)
+  and run `plugover setup` (or double-click the `.exe`).
+- **Debian package:** `sudo apt install ./plugover_<version>_<arch>.deb`, then `plugover setup`.
+- **Unattended:** `plugover setup --relay --lan 192.168.1.0/24 --yes` or `plugover setup --host --yes`.
 
-- `plugover update` installs the newest release and keeps pairings and settings. It installs only a
-  release signed with Plugover's release key. Update the relay and the host together; the console
-  and `plugover status` say which one is behind.
-- `plugover setup --uninstall` removes Plugover. On a computer that is both relay and host, add
-  `--relay` or `--host` to remove only one. Add `--purge` to delete pairings and settings too.
+</details>
 
-## Using it
+**Update** with `plugover update` on both machines. **Remove** with `plugover setup --uninstall`
+(add `--purge` to drop pairings and settings).
 
-The **Plugover** page in the punktfunk console shows each paired relay, how quickly it answers and
-the devices plugged into it. Without punktfunk, `plugover ui` opens the same page in your browser.
+## Streaming apps
 
-### Streaming apps
-
-| App | How Plugover follows its streams |
+| App | How Plugover knows a stream is on |
 |---|---|
-| punktfunk | its console plugin, which setup adds |
-| Sunshine and its forks (Apollo, Vibeshine, Vibepollo, Foundation Sunshine, LuminalShine, Polaris, Hermes, SolarFlare) | a prep command in the app's config, which host setup adds (run it again after installing the app, then restart the app). It runs before the game starts, so devices are there when the game looks for them. Apps with "exclude global prep commands" set skip it. |
-| Parsec (Windows) | its log, `log.txt`: a stream runs while a client is connected and Parsec runs. Experimental. |
-| Steam Remote Play | its log, `logs/streaming_log.txt`: from "Streaming started to" until the stream's end line, or until Steam quits. Experimental. |
-| anything else | devices stay connected, or call `plugover session start` and `stop` from the app's own hooks |
+| punktfunk | its console plugin |
+| Sunshine, Apollo, Vibeshine, Vibepollo, Polaris, Hermes and other forks | a prep command setup adds to the app's config (restart the app afterwards) |
+| Parsec (Windows), Steam Remote Play | their logs, experimental |
+| anything else | devices stay connected, or call `plugover session start` / `stop` |
 
-Plugover follows Parsec and Steam once they are installed; nothing needs setting up. Having
-them installed does not change when devices connect: only after one of them has streamed here does
-**automatically** mean "during streams".
+Each device has a mode: **automatically** (during streams if something reports them, otherwise
+always), **always**, or **only during streams**.
 
-Setup finds Sunshine-family configs in `~/.config/<app>/` on Linux (and the Flatpak's) and in
-`Program Files\<app>\config\sunshine.conf` on Windows; `plugover doctor` says which ones it
-follows. Only Sunshine on Linux has been tested; see [Compatibility](#compatibility). Sunshine's
-Flatpak hung in its screen capture on KDE with an NVIDIA card before it ran any prep command, so use
-the native package there.
+Installed punktfunk or Sunshine after Plugover? Run `plugover setup --host` again; `plugover doctor`
+tells you when.
 
-Turn a device on and it connects when you play. By default that is automatic: while something on
-the host reports streams (the punktfunk plugin, or `plugover session`), it connects only during
-streams; otherwise it stays connected. A device's details let you:
+## Bluetooth controllers
 
-- choose when it connects: automatically, always, or only during streams,
-- keep auto-connect to one port, when two of the same model are plugged in,
-- fix a wrong name or device kind.
+Pair a controller with the relay from **Bluetooth devices** in the relay's menu, or with
+`plugover bluetooth scan` and `plugover bluetooth pair <address>` on the relay. Once connected it
+shows up next to the USB devices.
 
-### Bluetooth controllers
+The host gets a copy of the controller with the same ids, so drivers and Steam treat it as their
+own: rumble, light bar and motion sensors included. While a host uses it, the relay's desktop
+ignores it.
 
-Pair a Bluetooth controller or keyboard with the relay: on the Plugover page, **Bluetooth
-devices** in a relay's menu looks for devices in pairing mode and pairs them; on the relay itself,
-`plugover bluetooth scan`, `plugover bluetooth pair <address>` and `plugover bluetooth forget
-<address>` do the same (as do `bluetoothctl` and your desktop's Bluetooth settings). Controllers
-and most keyboards pair without a code; an old keyboard that asks for one gets 0000, so type 0000
-and Enter on it while it pairs. While it is connected it shows up next to the USB devices, with a port like `bt-8c41f2974f28`, and you turn it on like any other device. Plugover does not
-forward the Bluetooth radio: the relay passes the controller's reports on, and a Linux host
-recreates the controller on its Bluetooth bus with the same ids, so its drivers and Steam treat it
-as if it were paired with the host itself, rumble, lights and motion sensors included. While a
-host has it, the relay's own desktop and games ignore it; programs on the relay that read the
-controller directly, like Steam, can still see it.
+This needs Linux on both sides. For a Windows host, put a USB Bluetooth adapter in the relay and
+forward the adapter instead.
 
-This works between a Linux relay and a Linux host only, and is experimental. Windows hosts and
-relays will not get it: Windows cannot recreate a Bluetooth device the way Linux does. For a
-Windows host, plug a USB Bluetooth adapter into the relay, pass the adapter through like any USB
-device, and pair the controller with the host itself. Pads paired with the device your streaming
-client runs on usually need no Plugover at all, as the client forwards them.
+## Commands
 
-A device another host has shows **Take over**: the relay takes it back from that host and keeps it
-for this one. Both hosts need Plugover 0.7 or newer on the relay.
-
-If a device cannot connect, its row says why.
-
-Everything also works from a terminal on the host:
+On the host:
 
 ```sh
-plugover status                          # paired relays, their devices and the link latency
-plugover pair                            # find a relay on the network and pair with it
-plugover auto 046d:c24f on               # connect a device whenever a stream runs
-plugover auto 046d:c24f on --port 1-2    # only the one plugged into this port
-plugover auto 046d:c24f on --mode always # stay connected, stream or not (also: auto, session)
-plugover ui                              # open the Plugover page in a browser
-plugover session start --source myapp    # tell Plugover a stream started (stop when it ends)
-                                         # (on Windows, ui and session need an administrator terminal)
-plugover attach 1-2                      # connect a device now (plugover detach 1-2 to give it back)
-plugover attach 1-2 --take               # take it over from another host that has it
-plugover label 0fd9:0080 --name "Stream Deck" --kind other   # fix a name or kind
+plugover status                          # relays, devices, latency
+plugover auto 046d:c24f on               # use a device (add --mode always|session, --port 1-2)
+plugover attach 1-2 [--take]             # connect one now, taking it from another host if needed
+plugover detach 1-2                      # give it back
+plugover label 0fd9:0080 --name "Stream Deck" --kind other
 plugover forget simrig                   # remove a relay
-plugover unencrypted simrig on           # connect a relay too old to encrypt anyway (see Security)
+plugover ui                              # the Plugover page in a browser
 ```
 
-And on the relay, as root (or administrator on Windows):
+On the relay (as root):
 
 ```sh
-plugover code                  # print a new pairing code
-plugover hosts                 # list paired hosts
-plugover unpair desktop        # remove a host; it loses its devices within a second
-plugover share 046d:c24f on    # share only the devices you list
-plugover share --all           # share everything again
+plugover code                  # new pairing code
+plugover hosts                 # paired hosts
+plugover unpair desktop        # remove a host
+plugover share 046d:c24f on    # share only listed devices (share --all to undo)
 ```
 
-Devices are identified by their USB id (`vendor:product`, shown by `plugover status`). Hubs, USB
-storage and network adapters are never shared. Set `NO_COLOR=1` to turn off colored output.
+Devices are named by USB id (`vendor:product`, see `plugover status`). Hubs, storage and network
+adapters are never shared. On Windows, run `ui` and `session` from an administrator terminal.
 
 ## Compatibility
 
-| System | Status |
-|---|---|
-| Linux relay and Linux host, x86_64 | **Tested** (Ubuntu 24.04 relay, EndeavourOS host) |
-| Linux on ARM64 and ARMv7, such as a Raspberry Pi | Built, not tested yet |
-| Windows relay or host | Built, not tested yet |
-| Debian package | Built, not tested yet |
+Only what is marked tested has been tried on real hardware.
 
-| Streaming app | Status |
+| | Status |
 |---|---|
+| Linux relay and host, x86_64 | **Tested** (Ubuntu 24.04 relay, EndeavourOS host) |
+| Linux on ARM (Raspberry Pi) | not tested |
+| Windows relay or host | not tested |
 | punktfunk | **Tested** |
-| Sunshine on Linux | **Tested** with a native Sunshine and Moonlight: start, stop, and a Sunshine crash mid-stream. Sunshine's Flatpak hung in its screen capture on KDE with NVIDIA before running any prep command; use the native package there |
-| Sunshine's forks on Linux | Same hook, not tested yet |
-| Sunshine and forks on Windows | Built, not tested yet |
-| Parsec | Built and tested against logged lines from others; not with a real Parsec yet |
-| Steam Remote Play | Followed through a log written by hand on Linux; the end lines come from another project, not from a real stream yet |
+| Sunshine on Linux | **Tested** (native package; the Flatpak hangs on KDE with NVIDIA) |
+| Sunshine forks, Sunshine on Windows | not tested |
+| Parsec, Steam Remote Play | experimental, not tested with a real stream |
+| Bluetooth, Linux to Linux | **Tested** with DualShock 4 (relay and host on one machine) |
+| Logitech G29 (`046d:c24f`) | **Tested** |
 
-| Bluetooth | Status |
-|---|---|
-| Linux relay to Linux host | Experimental. **Tested** with two DualShock 4s (buttons, sticks, touchpad, motion sensors, rumble, light bar), relay and host on one machine; not yet across two machines, nor DualSense, Switch Pro or Xbox pads |
-| Windows relay or host | Not planned; pass a USB Bluetooth adapter through instead |
-
-| Device | USB id | Status |
-|---|---|---|
-| Logitech G29 Driving Force | `046d:c24f` | **Tested** |
-
-Anything that works over USB should work, but only what is listed has been tried. If Plugover
-works, or doesn't, on your setup,
-[send a compatibility report](https://github.com/wiktorekdev/plugover/issues/new?template=compatibility.md)
-and it will be added here.
+Tried it on something else? [Send a compatibility report](https://github.com/wiktorekdev/plugover/issues/new?template=compatibility.md).
 
 ## Troubleshooting
 
-Start with `plugover doctor` on both machines. It checks the setup and says what to fix.
+Run `plugover doctor` on both machines first; it says what to fix. `plugover logs -f` follows the
+log (`--relay` for the relay's).
 
-```sh
-plugover doctor            # check this machine
-plugover logs -f           # follow the host daemon's log (add --relay for the relay's)
-plugover doctor --report   # everything a bug report needs, as plain text
-```
-
-| Problem | What to do |
+| Problem | Fix |
 |---|---|
-| The relay is not found | Check that it is on and that its firewall allows TCP 7275 and UDP 5353. You can also pair by address: `plugover pair 192.168.1.50`. |
-| The relay shows as offline | Run `plugover doctor` on the relay. |
-| A device does not connect | Its row in the console, `plugover status` and `plugover doctor` say why. |
-| Right after installing the host on Linux, doctor says plugging devices in is not allowed | Log out and back in once; setup added you to the `punktfunk` group (or, without punktfunk, to a `plugover` group of its own). |
-| You installed or removed punktfunk or Sunshine after Plugover | Run `plugover setup --host` again: it adds the console page or the Sunshine hook, and moves plugging devices in to whichever group is there. `plugover doctor` says when it is needed. |
-| Force feedback stutters | Check the latency next to the relay. Wi-Fi is the usual cause; connect both machines by cable. |
-| Setup says a kernel module is missing | See [Requirements](#requirements). |
-| A relay "cannot encrypt, so its devices do not connect" | It runs Plugover older than 0.6. Update it; see [Security](#security). |
-| A wheel stops after it switches modes | Plugover connects it again when it comes back on the same port within 20 seconds. If it stays off, turn on auto-connect for the new USB id too. |
+| Relay not found | Check TCP 7275 and UDP 5353 in its firewall, or pair by address: `plugover pair 192.168.1.50`. |
+| "Plugging devices in is not allowed" right after install | Log out and back in once. |
+| Force feedback stutters | Use a cable instead of Wi-Fi; the latency is shown next to the relay. |
+| A wheel stops after switching modes | Turn on its other USB id too. |
 
 Still stuck? [Open an issue](https://github.com/wiktorekdev/plugover/issues/new?template=bug_report.md)
 with `plugover doctor --report` from both machines.
 
 ## Security
 
-- **Pairing** uses a one-time code that never crosses the network: both sides use it for a SPAKE2
-  key exchange. A code works once, for 15 minutes, and the relay stops accepting guesses after five
-  wrong ones.
-- **Every connection** to the relay proves it holds the key from pairing. A relay can unpair a host
-  at any time, or share only the devices you list.
-- **Everything is encrypted**, the device list and the USB traffic, with AES-128-GCM in TLS 1.3
-  records and keys of its own for every connection. A record that was changed on the way ends the
-  connection. On Linux the kernel encrypts USB traffic when it has its `tls` module, and Plugover
-  does otherwise; `plugover doctor` says which.
-- **Relays older than 0.6 cannot encrypt.** Their devices stay off until you update the relay or
-  allow it with **Connect without encryption** in the console (`plugover unencrypted <relay> on`),
-  after which the console marks it **Not encrypted**. A relay that encrypted once is never accepted
-  unencrypted again, so nobody on the network can talk this host out of encrypting.
-- **Updates** are checked against a signature: `plugover update` installs only releases whose
-  `SHA256SUMS` is signed with the key in [packaging/release-key.pem](packaging/release-key.pem).
+- Pairing uses a one-time code that never crosses the network (SPAKE2). Five wrong guesses close
+  pairing.
+- Everything between relay and host is encrypted (AES-128-GCM in TLS 1.3 records), in the kernel
+  when it can.
+- A relay can unpair a host or limit what it shares at any time.
+- `plugover update` installs only releases signed with [the release key](packaging/release-key.pem).
 
-Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+Relays older than 0.6 cannot encrypt; update them. Report vulnerabilities privately, see
+[SECURITY.md](SECURITY.md).
 
-## How it works
+## Building
 
-The relay lends devices with the kernel's `usbip-host` on Linux, or usbipd-win on Windows. The host
-daemon keeps a connection to each paired relay, hears about plugs as they happen, and attaches the
-chosen devices through `vhci-hcd` on Linux or usbip-win2 on Windows while a stream runs. The
-punktfunk plugin tells the daemon when streams start and stop, and serves the console page.
-
-On Linux, once a device is attached, its USB traffic runs entirely in the kernel on both machines,
-encrypted by the kernel's TLS. Where the kernel cannot encrypt, and on Windows, it passes through
-Plugover, which encrypts it on its way to the other machine.
-
-What `plugover setup` installs:
-
-| | Linux | Windows |
-|---|---|---|
-| **Relay** | `/usr/local/bin/plugover`, the `plugover-relay` service, the `usbip-host` module, firewall rules for your network (firewalld, ufw or nftables) | usbipd-win, a startup task, firewall rules that also block usbipd's own port (TCP 3240), so pairing is the only way in |
-| **Host** | `~/.local/bin/plugover`, the `plugover-host` user service, the `vhci-hcd` module, the console plugin | usbip-win2, a startup task, the console plugin |
-
-## Building from source
-
-You need Rust with the `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
-`armv7-unknown-linux-musleabihf` and `x86_64-pc-windows-gnu` targets, `cargo-zigbuild`, bun and
-`dpkg-deb`.
+Needs Rust with the musl, armv7 and windows-gnu targets, `cargo-zigbuild`, bun and `dpkg-deb`.
 
 ```sh
-scripts/build.sh                                # release files in dist/
-scripts/deploy.sh <relay-ssh-host> <lan-cidr>   # build, set up the relay over ssh and the host here
-cargo test                                      # also regenerates plugin/ui/src/generated/
+scripts/build.sh          # release files in dist/
+cargo test                # also regenerates plugin/ui/src/generated/
 ```
 
-| Path | What |
-|---|---|
-| `src/` | the `plugover` binary: relay, host daemon, command line, and the installer in `src/setup/` |
-| `plugin/` | the punktfunk console plugin, built into the release binaries |
-| `packaging/` | `installer.sh`, `installer.ps1` and templates for the Debian package and winget manifests |
-| `data/catalog.toml` | friendly names for devices whose USB ids are unhelpful |
+`src/` is the binary (relay, host daemon, CLI, installer), `plugin/` the console page and
+`data/catalog.toml` friendly device names.
 
-## Contributing
-
-Bug reports, compatibility reports, questions and pull requests are all welcome as
-[issues](https://github.com/wiktorekdev/plugover/issues). Most of the code was written with Claude
-Opus 5.5.
+Most of the code was written with Claude Opus 5.5. Issues and pull requests are welcome.
 
 ## License
 
