@@ -1,11 +1,13 @@
 # Plugover
 
-Use the racing wheel, pedals or controllers plugged into one computer on a
-[punktfunk](https://git.unom.io/unom/punktfunk) host somewhere else on your network.
+Use the racing wheel, pedals or controllers plugged into one computer on a gaming PC somewhere
+else on your network, the one you stream games from with
+[punktfunk](https://git.unom.io/unom/punktfunk), Sunshine or one of its forks, or anything else.
 
 Plugover forwards the real USB device over USB/IP, not an emulated gamepad, so force feedback and
-vendor features work as if the device were plugged into the gaming PC. Devices connect when a
-stream starts and go back when it ends.
+vendor features work as if the device were plugged into the gaming PC. With punktfunk or a
+Sunshine-family host, devices connect when a stream starts and go back when it ends; without one
+they stay connected.
 
 ![The Plugover page in the punktfunk console](docs/img/console.png)
 
@@ -30,8 +32,8 @@ flowchart LR
 
 | | Relay | Host |
 |---|---|---|
-| **Linux** (x86_64, ARM64, ARMv7) | systemd, the `usbip-host` kernel module | systemd, the `vhci-hcd` kernel module, punktfunk-host |
-| **Windows** (10 or 11, x64) | administrator rights; setup installs [usbipd-win](https://github.com/dorssel/usbipd-win) | administrator rights, punktfunk-host; setup installs [usbip-win2](https://github.com/vadimgrn/usbip-win2) |
+| **Linux** (x86_64, ARM64, ARMv7) | systemd, the `usbip-host` kernel module | systemd, the `vhci-hcd` kernel module |
+| **Windows** (10 or 11, x64) | administrator rights; setup installs [usbipd-win](https://github.com/dorssel/usbipd-win) | administrator rights; setup installs [usbip-win2](https://github.com/vadimgrn/usbip-win2) |
 
 Most Linux distributions ship both kernel modules. If setup says one is missing, install your
 distribution's extra kernel modules (on Ubuntu: `linux-modules-extra-$(uname -r)`). Setup also loads
@@ -99,6 +101,19 @@ for a new one. A code works once, for 15 minutes.
 The **Plugover** page in the punktfunk console shows each paired relay, how quickly it answers and
 the devices plugged into it. Without punktfunk, `plugover ui` opens the same page in your browser.
 
+### Streaming apps
+
+| App | How Plugover follows its streams |
+|---|---|
+| punktfunk | its console plugin, which setup adds |
+| Sunshine and its forks (Apollo, Vibeshine, Vibepollo, Foundation Sunshine, LuminalShine, Polaris, Hermes, SolarFlare) | a prep command in the app's config, which host setup adds (run it again after installing the app, then restart the app). It runs before the game starts, so devices are there when the game looks for them. Apps with "exclude global prep commands" set skip it. |
+| anything else | devices stay connected, or call `plugover session start` and `stop` from the app's own hooks |
+
+Setup finds Sunshine-family configs in `~/.config/<app>/` on Linux (and the Flatpak's) and in
+`Program Files\<app>\config\sunshine.conf` on Windows; `plugover doctor` says which ones it
+follows. Only the Linux Sunshine hook has been run so far, against a stand-in for Sunshine; see
+[Compatibility](#compatibility).
+
 Turn a device on and it connects when you play. By default that is automatic: while something on
 the host reports streams (the punktfunk plugin, or `plugover session`), it connects only during
 streams; otherwise it stays connected. A device's details let you:
@@ -146,6 +161,12 @@ storage and network adapters are never shared. Set `NO_COLOR=1` to turn off colo
 | Linux on ARM64 and ARMv7, such as a Raspberry Pi | Built, not tested yet |
 | Windows relay or host | Built, not tested yet |
 | Debian package | Built, not tested yet |
+
+| Streaming app | Status |
+|---|---|
+| punktfunk | **Tested** |
+| Sunshine and forks on Linux | Hook built and run against a stand-in, not with a real Sunshine yet |
+| Sunshine and forks on Windows | Built, not tested yet |
 
 | Device | USB id | Status |
 |---|---|---|

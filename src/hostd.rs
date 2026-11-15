@@ -34,6 +34,10 @@ const FOLLOW: Duration = Duration::from_secs(20);
 /// A source that reported streams this recently still watches them, so devices in auto mode
 /// connect only during streams. punktfunk's plugin reports every 10 s.
 const WATCH: Duration = Duration::from_secs(60);
+/// How often the host apps of hooked sources are checked, and how many checks in a row they may
+/// miss before their stream counts as over.
+const PROBE: Duration = Duration::from_secs(5);
+const PROBE_MISSES: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -71,13 +75,17 @@ pub enum Request {
     UiCode,
     /// A stream started or stopped. Each `source` (the punktfunk plugin, a host app's hook, the
     /// CLI) holds its own lease; a stream runs while any lease does. With `ttl` (seconds) a lease
-    /// ends by itself unless renewed, for sources that may die without saying stop.
+    /// ends by itself unless renewed, for sources that may die without saying stop. With `port`,
+    /// the source's host app listens there while it runs: the source counts as watching streams
+    /// while it answers, and its lease ends when it stops answering (the app crashed mid-stream).
     Session {
         active: bool,
         #[serde(default = "punktfunk")]
         source: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ttl: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
     },
 }
 
@@ -193,6 +201,8 @@ impl Daemon {
         }
         let page = self.clone();
         thread::spawn(move || crate::ui::serve(page));
+        let probe = self.clone();
+        thread::spawn(move || probe.probe_hosts());
         let me = self.clone();
         // Also notices a device that dropped out, to plug it in again; reading vhci's status is cheap.
         thread::spawn(move || loop {
@@ -484,6 +494,32 @@ impl Daemon {
         self.apply_session();
     }
 
+    /// Checks the host apps of hooked sources: one that answers keeps its source watching; one that
+    /// stopped answering mid-stream (it crashed, so its hook never said stop) ends its stream.
+    fn probe_hosts(&self) {
+        let mut misses: HashMap<String, u32> = HashMap::new();
+        loop {
+            let watch = self.cfg.lock().unwrap().watch.clone();
+            for (source, port) in watch {
+                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+                    self.heard.lock().unwrap().insert(source.clone(), Instant::now());
+                    misses.remove(&source);
+                    continue;
+                }
+                let n = misses.entry(source.clone()).or_default();
+                *n += 1;
+                if *n == PROBE_MISSES && self.leases.lock().unwrap().contains_key(&source) {
+                    eprintln!("{source} stopped answering on port {port}; its stream is over");
+                    let _pass = self.reconciling.lock().unwrap();
+                    self.leases.lock().unwrap().remove(&source);
+                    self.apply_session();
+                }
+            }
+            thread::sleep(PROBE);
+        }
+    }
+
     /// Sources whose lease holds, dropping the ones that ran out.
     fn sessions(&self) -> Vec<String> {
         let mut leases = self.leases.lock().unwrap();
@@ -666,9 +702,15 @@ impl Daemon {
                 json!({ "ok": true })
             }
             Request::UiCode => json!({ "ok": true, "code": self.ui.code(), "port": crate::ui::PORT }),
-            Request::Session { active, source, ttl } => {
+            Request::Session { active, source, ttl, port } => {
                 anyhow::ensure!(!source.is_empty() && source.len() <= 64, "a session source needs a short name");
                 anyhow::ensure!(ttl.is_none_or(|t| (1..=86_400).contains(&t)), "a session lease lasts 1 second to 1 day");
+                if let Some(port) = port {
+                    let mut cfg = self.cfg.lock().unwrap();
+                    if cfg.watch.insert(source.clone(), port) != Some(port) {
+                        self.save(&cfg)?;
+                    }
+                }
                 self.set_session(&source, active, ttl.map(Duration::from_secs));
                 self.reconcile();
                 json!({ "ok": true })
@@ -866,14 +908,14 @@ mod tests {
     #[test]
     fn a_stream_runs_while_any_source_holds_a_lease() {
         // What the punktfunk plugin of 0.6 sends: no source, so it is punktfunk's lease.
-        let Ok(Request::Session { active: true, source, ttl: None }) = parse(r#"{"op":"session","active":true}"#, None) else { panic!() };
+        let Ok(Request::Session { active: true, source, ttl: None, port: None }) = parse(r#"{"op":"session","active":true}"#, None) else { panic!() };
         assert_eq!(source, "punktfunk");
 
         let root = std::env::temp_dir().join(format!("plugover-hostd-leases-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let d = Daemon::open(root.join("sys"), root.join("host.toml")).unwrap();
         let on = || d.session.load(Ordering::SeqCst);
-        let session = |source: &str, active: bool| d.handle(Request::Session { active, source: source.into(), ttl: None }).unwrap();
+        let session = |source: &str, active: bool| d.handle(Request::Session { active, source: source.into(), ttl: None, port: None }).unwrap();
 
         session("punktfunk", true);
         session("cli", true);
@@ -890,8 +932,8 @@ mod tests {
         d.reconcile();
         assert!(!on(), "the lease ran out");
 
-        assert!(d.handle(Request::Session { active: true, source: String::new(), ttl: None }).is_err());
-        assert!(d.handle(Request::Session { active: true, source: "x".into(), ttl: Some(u64::MAX) }).is_err());
+        assert!(d.handle(Request::Session { active: true, source: String::new(), ttl: None, port: None }).is_err());
+        assert!(d.handle(Request::Session { active: true, source: "x".into(), ttl: Some(u64::MAX), port: None }).is_err());
         let _ = fs::remove_dir_all(root);
     }
 

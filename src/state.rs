@@ -76,6 +76,10 @@ pub struct HostConfig {
     /// None in a config from before 0.7; see `remembered_sources`.
     #[serde(default)]
     pub sources: Option<Vec<String>>,
+    /// Sources that report streams through a hook in their host app (Sunshine's prep commands),
+    /// and the port that app listens on while it runs: while it answers, the source is watching.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub watch: std::collections::BTreeMap<String, u16>,
 }
 
 impl HostConfig {
@@ -261,6 +265,7 @@ mod tests {
             auto: vec![AutoRule { relay: "ab".into(), device: "046d:c24f".into(), title: Some("Logitech G29".into()), port: None, mode: Mode::Always }],
             label: Vec::new(),
             sources: Some(vec!["punktfunk".into()]),
+            watch: [("sunshine".to_string(), 47989)].into(),
         };
         let mut cfg = cfg;
         set_label(&mut cfg.label, "0fd9:0080".into(), Some(" Stream Deck ".into()), None).unwrap();
@@ -271,7 +276,7 @@ mod tests {
         assert_eq!(cfg.label, [Label { device: "0fd9:0080".into(), name: None, kind: Some(crate::catalog::Kind::Other) }], "a new label replaces the old one; an empty one removes it");
         save(&path, &cfg).unwrap();
         let back: HostConfig = load(&path).unwrap();
-        assert_eq!((back.auto, back.label, back.sources), (cfg.auto, cfg.label, cfg.sources));
+        assert_eq!((back.auto, back.label, back.sources, back.watch), (cfg.auto, cfg.label, cfg.sources, cfg.watch));
         let old: HostConfig = toml::from_str("[[auto]]\nrelay = \"ab\"\ndevice = \"046d:c24f\"\n").unwrap();
         let mut old = old;
         assert_eq!(old.auto[0].mode, Mode::Auto, "rules from before 0.7 are in auto mode");

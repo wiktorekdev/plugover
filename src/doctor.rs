@@ -162,6 +162,14 @@ fn check_host(endpoint: &Path) -> bool {
         };
         warn("Host daemon", format!("runs Plugover {}, this command {}", daemon.unwrap_or("older than 0.5"), proto::VERSION), Some(hint));
     }
+    for h in crate::sunshine::find() {
+        let what = format!("{} streams", h.title());
+        match std::fs::read_to_string(&h.config) {
+            Ok(conf) if crate::sunshine::hooked(&conf) => ok(&what, format!("followed, through its prep commands ({})", h.config.display())),
+            Ok(_) => warn(&what, "not followed: its prep commands do not tell Plugover", Some(&format!("{} adds it", cmd("plugover setup --host")))),
+            Err(e) => warn(&what, format!("cannot read {}: {e}", h.config.display()), None),
+        }
+    }
     if status.relays.is_empty() {
         warn("Relays", "none paired", Some(&format!("{}, or Plugover in the punktfunk console", cmd("plugover pair"))));
     }

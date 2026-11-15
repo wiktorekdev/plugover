@@ -201,10 +201,15 @@ pub fn detect() -> Result<Found> {
     let version = |task: bool| task.then(|| version_of(&installed_exe())).flatten().or(task.then(|| "?".into()));
     let (relay, host) = (version(d.relay_task), version(d.host_task));
     let mut lines = vec![line(Mark::Ok, d.os.clone(), format!("build {}", d.build))];
+    let sunshine = crate::sunshine::find();
     lines.push(match &d.punktfunk {
         Some(_) => line(Mark::Ok, "punktfunk-host", "found"),
-        None => line(Mark::Todo, "punktfunk-host", "not found"),
+        None if sunshine.is_empty() => line(Mark::Todo, "punktfunk-host", "not found"),
+        None => line(Mark::Ok, "punktfunk-host", "not here"),
     });
+    for h in &sunshine {
+        lines.push(line(Mark::Ok, h.title(), h.config.display().to_string()));
+    }
     if let Some(v) = &d.usbipd {
         lines.push(line(Mark::Ok, format!("usbipd-win {v}"), "for the relay"));
     }
@@ -219,7 +224,7 @@ pub fn detect() -> Result<Found> {
     if relay.is_none() && host.is_none() {
         lines.push(line(Mark::Todo, "Plugover", "not installed"));
     }
-    Ok(Found { lines, punktfunk: d.punktfunk.is_some(), relay, host })
+    Ok(Found { lines, punktfunk: d.punktfunk.is_some(), sunshine, relay, host })
 }
 
 pub fn plan(role: Role, found: &Found, ctx: &Ctx) -> Result<Plan> {
@@ -408,7 +413,8 @@ fn plan_host(found: &Found, d: &Detected) -> Result<Plan> {
     lines.push(match (&punktfunk, PLUGIN.is_empty()) {
         (Some(_), false) => line(Mark::Todo, "Add the Plugover page to the punktfunk console", "and turn its plugin runner on"),
         (Some(_), true) => line(Mark::Warn, "This build has no console plugin inside", "release builds from scripts/build.sh do"),
-        (None, _) => line(Mark::Warn, "No punktfunk-host here", "run setup again after installing it to add the console plugin"),
+        (None, _) if !found.sunshine.is_empty() => line(Mark::Ok, "No punktfunk console here", format!("{} opens the Plugover page", crate::term::cmd("plugover ui"))),
+        (None, _) => line(Mark::Warn, "No streaming app found", "devices you turn on stay connected; run setup again after installing one"),
     });
 
     let mut steps: Vec<(String, Action)> = Vec::new();
@@ -428,6 +434,7 @@ fn plan_host(found: &Found, d: &Detected) -> Result<Plan> {
         "Checking that the host daemon answers".into(),
         Box::new(|| wait_for("the host daemon", || crate::hostd::call(&crate::endpoint(), &crate::hostd::Request::Status).is_ok())),
     ));
+    super::hook_streaming_hosts(found, &installed_exe(), &mut lines, &mut steps);
     let after: Action = Box::new(|| {
         restart_note("the USB/IP driver loads");
         crate::doctor::checks(&crate::endpoint(), &crate::config_dir().join("host.toml"), &crate::relay_state());
@@ -482,6 +489,9 @@ fn plan_uninstall(found: &Found, ctx: &Ctx) -> Result<Plan> {
 
 /// Removes the relay, the host or both; `everything` when nothing of Plugover stays.
 fn remove(relay: bool, host: bool, everything: bool, purge: bool) -> Result<()> {
+    if host {
+        super::unhook_streaming_hosts();
+    }
     let mut script = String::new();
     for (task, on) in [(RELAY_TASK, relay), (HOST_TASK, host)] {
         if on {

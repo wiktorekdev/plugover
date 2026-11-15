@@ -13,7 +13,7 @@ use windows as os;
 
 use crate::{
     proto::VERSION,
-    term::{ACCENT, BAD, BOLD, DIM, fail, ok, paint, warn},
+    term::{ACCENT, BAD, BOLD, DIM, cmd, fail, ok, paint, warn},
 };
 use anstream::println;
 use anyhow::{Context, Result, bail};
@@ -88,6 +88,8 @@ pub struct Found {
     pub lines: Vec<Line>,
     /// punktfunk-host is here, so this is probably the host.
     pub punktfunk: bool,
+    /// Sunshine and its forks installed here, by their config files.
+    pub sunshine: Vec<crate::sunshine::Host>,
     /// Installed versions.
     pub relay: Option<String>,
     pub host: Option<String>,
@@ -221,15 +223,16 @@ fn choose(found: &Found) -> Result<Option<Role>> {
         None if suggested => paint(ACCENT, "  suggested"),
         None => String::new(),
     };
+    let streams = found.punktfunk || !found.sunshine.is_empty();
     let mut items = vec![
-        (Some(Role::Host), "Host", format!("punktfunk runs here, the devices come to it{}", note(&found.host, found.punktfunk))),
-        (Some(Role::Relay), "Relay", format!("the devices are plugged in here{}", note(&found.relay, !found.punktfunk))),
+        (Some(Role::Host), "Host", format!("the games and the streaming app run here, the devices come to it{}", note(&found.host, streams))),
+        (Some(Role::Relay), "Relay", format!("the devices are plugged in here{}", note(&found.relay, !streams))),
     ];
     if found.relay.is_some() || found.host.is_some() {
         items.push((Some(Role::Uninstall), "Uninstall", "remove Plugover from this computer".into()));
     }
     items.push((None, "Quit", "change nothing".into()));
-    let default = if found.punktfunk || found.host.is_some() { 0 } else { 1 };
+    let default = if streams || found.host.is_some() { 0 } else { 1 };
     let labels: Vec<(&str, &str)> = items.iter().map(|(_, l, d)| (*l, d.as_str())).collect();
     Ok(items[menu(&labels, default)?].0)
 }
@@ -659,7 +662,51 @@ pub fn next_steps_host() {
     let paired = crate::hostd::call(&crate::endpoint(), &crate::hostd::Request::Status)
         .is_ok_and(|v| v["relays"].as_array().is_some_and(|r| !r.is_empty()));
     let what = if paired { "to pick the devices that connect when you stream" } else { "and pair with your relay" };
-    println!("\n  {} open the punktfunk console, go to {} {what}.", paint(DIM, "Next:"), paint(BOLD, "Plugover"));
+    println!("\n  {} open {} in the punktfunk console, or run {}, {what}.", paint(DIM, "Next:"), paint(BOLD, "Plugover"), cmd("plugover ui"));
+}
+
+/// Lines and steps that make Sunshine and its forks tell the host daemon about their streams.
+/// Run after the daemon is up: each hooked host is announced to it right away.
+pub fn hook_streaming_hosts(found: &Found, bin: &Path, lines: &mut Vec<Line>, steps: &mut Vec<(String, Action)>) {
+    for h in &found.sunshine {
+        let title = h.title();
+        match fs::read_to_string(&h.config) {
+            Ok(conf) if crate::sunshine::hooked(&conf) => {
+                lines.push(line(Mark::Ok, format!("{title} streams"), "followed through its prep commands"));
+                let h = h.clone();
+                steps.push((format!("Following {title} streams"), Box::new(move || {
+                    crate::sunshine::announce(&h);
+                    Ok(())
+                })));
+            }
+            Ok(_) => {
+                lines.push(line(
+                    Mark::Todo,
+                    format!("Follow {title} streams"),
+                    format!("adds a prep command to {} (a copy stays next to it); restart {title} afterwards", h.config.display()),
+                ));
+                let (h, bin) = (h.clone(), bin.to_path_buf());
+                steps.push((
+                    format!("Adding Plugover to {title}'s prep commands"),
+                    Box::new(move || {
+                        crate::sunshine::hook(&h, &bin, true)?;
+                        crate::sunshine::announce(&h);
+                        Ok(())
+                    }),
+                ));
+            }
+            Err(e) => lines.push(line(Mark::Warn, format!("{title} found"), format!("cannot read {}: {e}", h.config.display()))),
+        }
+    }
+}
+
+/// Takes Plugover's prep commands out of every Sunshine-family config here.
+pub fn unhook_streaming_hosts() {
+    for h in crate::sunshine::find() {
+        if let Err(e) = crate::sunshine::hook(&h, Path::new(""), false) {
+            eprintln!("  could not take Plugover out of {}: {e:#}", h.config.display());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -693,6 +740,7 @@ mod tests {
         let found = |relay: bool, host: bool| Found {
             lines: Vec::new(),
             punktfunk: false,
+            sunshine: Vec::new(),
             relay: relay.then(|| "0.5.1".into()),
             host: host.then(|| "0.5.1".into()),
         };

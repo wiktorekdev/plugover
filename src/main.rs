@@ -14,6 +14,7 @@ mod proto;
 mod relay;
 mod setup;
 mod state;
+mod sunshine;
 mod sysfs;
 mod term;
 mod tls;
@@ -223,6 +224,14 @@ enum Cmd {
         /// may not get to say stop.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400))]
         ttl: Option<u64>,
+        /// The streaming app listens on this port while it runs: Plugover follows its streams while
+        /// it answers, and ends this one if it stops answering.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Never fail: for a streaming app's prep commands, which stop the game from launching
+        /// when a command fails. Problems are printed, not returned.
+        #[arg(long)]
+        hook: bool,
     },
 }
 
@@ -386,8 +395,11 @@ fn run(cli: Cli) -> Result<()> {
                 println!("Open this address in a browser on this computer within a minute: {url}");
             }
         }
-        Cmd::Session { state, source, ttl } => {
-            call(Request::Session { active: state == "start", source, ttl })?;
+        Cmd::Session { state, source, ttl, port, hook } => {
+            if let Err(e) = call(Request::Session { active: state == "start", source, ttl, port }) {
+                anyhow::ensure!(hook, e);
+                eprintln!("plugover: {e:#}");
+            }
         }
         Cmd::Attach { busid, relay } => {
             let v = call(Request::Attach { relay, busid: busid.clone() })?;

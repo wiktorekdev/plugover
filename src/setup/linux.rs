@@ -183,10 +183,15 @@ pub fn detect() -> Result<Found> {
     if systemd.is_none() || !Path::new("/run/systemd/system").is_dir() {
         bail!("Plugover runs as a systemd service, and systemd is not running here");
     }
+    let sunshine = crate::sunshine::find();
     lines.push(match &punktfunk {
         Some(v) => line(Mark::Ok, format!("punktfunk-host {v}"), ""),
-        None => line(Mark::Todo, "punktfunk-host", "not found"),
+        None if sunshine.is_empty() => line(Mark::Todo, "punktfunk-host", "not found"),
+        None => line(Mark::Ok, "punktfunk-host", "not here"),
     });
+    for h in &sunshine {
+        lines.push(line(Mark::Ok, h.title(), h.config.display().to_string()));
+    }
     for (role, v) in [("relay", &relay), ("host", &host)] {
         if let Some(v) = v {
             lines.push(line(Mark::Ok, format!("Plugover {role} {v}"), "installed"));
@@ -195,7 +200,7 @@ pub fn detect() -> Result<Found> {
     if relay.is_none() && host.is_none() {
         lines.push(line(Mark::Todo, "Plugover", "not installed"));
     }
-    Ok(Found { lines, punktfunk: punktfunk.is_some(), relay, host })
+    Ok(Found { lines, punktfunk: punktfunk.is_some(), sunshine, relay, host })
 }
 
 pub fn plan(role: Role, found: &Found, ctx: &Ctx) -> Result<Plan> {
@@ -494,7 +499,8 @@ fn plan_host(found: &Found) -> Result<Plan> {
     lines.push(match (found.punktfunk, PLUGIN.is_empty()) {
         (true, false) => line(Mark::Todo, "Add the Plugover page to the punktfunk console", "and turn its plugin runner on"),
         (true, true) => line(Mark::Warn, "This build has no console plugin inside", "release builds from scripts/build.sh do"),
-        (false, _) => line(Mark::Warn, "No punktfunk-host here", "run setup again after installing it to add the console plugin"),
+        (false, _) if !found.sunshine.is_empty() => line(Mark::Ok, "No punktfunk console here", format!("{} opens the Plugover page", crate::term::cmd("plugover ui"))),
+        (false, _) => line(Mark::Warn, "No streaming app found", "devices you turn on stay connected; run setup again after installing one"),
     });
     // punktfunk-host's udev rule lets its group plug devices in.
     let writable = fs::OpenOptions::new().write(true).open(Path::new(VHCI).join("attach")).is_ok();
@@ -522,6 +528,7 @@ fn plan_host(found: &Found) -> Result<Plan> {
         "Checking that the host daemon answers".into(),
         Box::new(|| wait_for("the host daemon", || crate::hostd::call(&crate::endpoint(), &crate::hostd::Request::Status).is_ok())),
     ));
+    super::hook_streaming_hosts(found, &host_bin(), &mut lines, &mut steps);
 
     let after: Action = Box::new(move || {
         crate::doctor::checks(&crate::endpoint(), &crate::config_dir().join("host.toml"), &crate::relay_state());
@@ -618,6 +625,7 @@ fn remove_relay(purge: bool) -> Result<()> {
 }
 
 fn remove_host(purge: bool) -> Result<()> {
+    super::unhook_streaming_hosts();
     let bin = unit_bin(&host_unit());
     let _ = exec(Command::new("systemctl").args(["--user", "disable", "--now", "plugover-host"]));
     let _ = fs::remove_file(host_unit());

@@ -11,7 +11,8 @@ Status: proposal, nothing implemented. Written 2026-11-14 against Plugover 0.6.0
 2. **"A stream is running" becomes a set of session sources with leases**, not one boolean. Each
    integration (punktfunk, the GameStream adapter, a CLI call, a log watcher) holds its own lease.
    Devices get a per-rule mode: `session`, `always` or `manual`.
-3. **One GameStream adapter covers every Sunshine-family host and most others.** Every host
+3. **One adapter covers every Sunshine-family host** (see Phase 2 for why it is a prep-command
+   hook and not the poll described here). Originally: every host
    Moonlight can talk to must answer `GET /serverinfo` on its HTTP port, and Sunshine reports the
    running app there (`currentgame`, `state`). That plus Sunshine's `global_prep_cmd` hook (do/undo)
    gives a poll signal and a push signal without per-fork code. Fork differences live in a data
@@ -411,14 +412,32 @@ hardware and recorded in the README compatibility tables.
 - Not yet verified: with a real relay and wheel (always mode, mode changes in the page), on
   Windows (`plugover ui` there needs administrator rights like the other host commands).
 
-**Phase 2: GameStream adapter**
-- `/serverinfo` poller, fork data table, detection on Linux and Windows, guided prep-command setup.
-- Test order, by user base and access: Sunshine (Linux, Windows), Apollo, Vibeshine, Vibepollo,
-  Foundation Sunshine, LuminalShine, Polaris, Hermes, SolarFlare, Moonshine, Rubylight.
-- Done per host: detected, stream start attaches and stream end detaches with a real wheel. Only
-  then does it get a row in the README.
+**Phase 2: Sunshine-family adapter** (done in the working tree, not released)
+- Correction to 4.3, from reading each fork's `nvhttp.cpp`: over plain HTTP, Apollo, Hermes and
+  Polaris always report `currentgame = 0` (only paired HTTPS clients see the game), and Vibeshine
+  decides per caller. Only official and Foundation Sunshine answer it. So there is no poller; the
+  shared mechanism is the `global_prep_cmd` hook, which every fork keeps (`list_prep_cmd_f`).
+- Sunshine aborts the launch when a do-command fails (`process.cpp`), so the hook runs
+  `plugover session start --hook`, which never fails.
+- `src/sunshine.rs` finds configs by file: `~/.config/{sunshine,apollo,vibeshine,polaris,hermes}/`
+  (each fork's own file name, checked in source: `polaris.conf`, `hermes.conf`, `vibeshine.conf`,
+  `sunshine.conf`), the Sunshine Flatpak (`flatpak-spawn --host`), and on Windows any
+  `Program Files\<app>\config\sunshine.conf` (elevated command, so it may read the daemon token).
+  It merges one entry into `global_prep_cmd`, keeps a copy of the file before the first change,
+  and removes the entry on uninstall.
+- The hook passes the app's `port`. The daemon remembers it (`[watch]` in host.toml), counts the
+  source as watching while the port answers, and ends its stream after three missed checks 5 s
+  apart, for an app that crashed without running its undo command.
+- Setup lists found apps, adds the hook as a planned step and announces it to the daemon; doctor
+  says which configs are followed.
+- Verified: unit tests for config merging; the real hook commands against a test daemon with a
+  stand-in listener (start, stop, staying watched for 70 s, crash ending the stream within 17 s,
+  exit 0 with the daemon down). Not verified: any real Sunshine-family app, Windows, the Flatpak.
+- Not covered: Moonshine and Wolf (no prep commands), Rubylight (Rust rewrite; its API not read).
 
 **Phase 3: reliability**
+- Also from Phase 1 and 2: `sources` scoping on rules, and a narrower Windows token if elevated
+  prep commands turn out not to reach the daemon.
 - Serial-number following, relay stuck-device recovery, relay "take over" request, doctor checks
   for foreign USB forwarding.
 
