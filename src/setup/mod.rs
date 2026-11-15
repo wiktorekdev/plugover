@@ -6,6 +6,8 @@
 mod linux;
 #[cfg(not(windows))]
 use linux as os;
+#[cfg(not(windows))]
+pub use linux::console_lacks_plugin;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]

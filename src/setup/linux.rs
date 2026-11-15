@@ -17,6 +17,10 @@ const FIREWALL_RECORD: &str = "/var/lib/plugover/firewall";
 const OLD_MODULES: &str = "/etc/modules-load.d/plugover.conf";
 /// Lets the logged-in user recreate a relay's Bluetooth devices through /dev/uhid.
 const UHID_RULE: &str = "/etc/udev/rules.d/70-plugover-uhid.rules";
+/// Lets the `plugover` group plug devices in, where punktfunk's rule does not do it for its group.
+const VHCI_RULE: &str = "/etc/udev/rules.d/70-plugover-vhci.rules";
+/// punktfunk-host's packaged rule, which gives the `punktfunk` group vhci-hcd.
+const PUNKTFUNK_RULE: &str = "/usr/lib/udev/rules.d/60-punktfunk.rules";
 const NFT_CONF: &str = "/etc/nftables.conf";
 const VHCI: &str = "/sys/devices/platform/vhci_hcd.0";
 const PORT: u16 = crate::proto::DEFAULT_PORT;
@@ -82,6 +86,12 @@ fn host_unit() -> PathBuf {
 
 fn plugin_vendor() -> PathBuf {
     crate::home().join(".config/punktfunk/plugins/vendor")
+}
+
+/// punktfunk is here but its console has no Plugover page: it came after Plugover's setup.
+pub fn console_lacks_plugin() -> bool {
+    let added = fs::read_dir(plugin_vendor()).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with("punktfunk-plugin-plugover-"));
+    !added && probe("punktfunk-host", &["--version"]).is_some()
 }
 
 fn is_root() -> bool {
@@ -504,12 +514,19 @@ fn plan_host(found: &Found) -> Result<Plan> {
         (false, _) if !found.sunshine.is_empty() => line(Mark::Ok, "No punktfunk console here", format!("{} opens the Plugover page", crate::term::cmd("plugover ui"))),
         (false, _) => line(Mark::Warn, "No streaming app found", "devices you turn on stay connected; run setup again after installing one"),
     });
-    // punktfunk-host's udev rule lets its group plug devices in.
+    // Writing vhci-hcd's attach file creates a USB device, so it stays with one group. punktfunk's
+    // udev rule gives it to the punktfunk group; without punktfunk, Plugover's own rule gives it to
+    // a plugover group. Either may come or go later; running setup again picks the one there is.
     let writable = fs::OpenOptions::new().write(true).open(Path::new(VHCI).join("attach")).is_ok();
-    let join_group = vhci && !writable && probe("getent", &["group", "punktfunk"]).is_some() && !user_in_group("punktfunk");
+    let group = if Path::new(PUNKTFUNK_RULE).exists() && probe("getent", &["group", "punktfunk"]).is_some() { "punktfunk" } else { "plugover" };
+    let own_rule = vhci && !writable && group == "plugover" && !Path::new(VHCI_RULE).exists();
+    let join_group = vhci && !writable && !user_in_group(group);
+    if own_rule {
+        lines.push(line(Mark::Todo, "Let the plugover group plug devices in", format!("a udev rule, {VHCI_RULE}")));
+    }
     if join_group {
-        lines.push(line(Mark::Todo, "Add you to the punktfunk group", "so you may plug devices in; takes effect at your next login"));
-    } else if vhci && !writable {
+        lines.push(line(Mark::Todo, format!("Add you to the {group} group"), "so you may plug devices in; takes effect at your next login"));
+    } else if vhci && !writable && !own_rule {
         lines.push(line(Mark::Warn, "You may not plug devices in", format!("{VHCI}/attach is not writable for you")));
     }
 
@@ -533,9 +550,26 @@ fn plan_host(found: &Found) -> Result<Plan> {
             }),
         ));
     }
+    if own_rule {
+        steps.push((
+            "Adding the udev rule for plugging devices in".into(),
+            Box::new(|| {
+                if probe("getent", &["group", "plugover"]).is_none() {
+                    root("groupadd", &["--system", "plugover"])?;
+                }
+                root_write(
+                    VHCI_RULE,
+                    "# Plugover: the plugover group may plug devices in through vhci-hcd (attach and detach).\n\
+                     ACTION==\"add\", SUBSYSTEM==\"platform\", KERNEL==\"vhci_hcd.*\", RUN+=\"/bin/sh -c 'chgrp plugover /sys%p/attach /sys%p/detach && chmod 0660 /sys%p/attach /sys%p/detach'\"\n",
+                )?;
+                // vhci_hcd is there already, so its add event has passed: apply the rule now.
+                root("udevadm", &["trigger", "--action=add", "--subsystem-match=platform", "--sysname-match=vhci_hcd.*"]).map(drop)
+            }),
+        ));
+    }
     if join_group {
         let user = probe("id", &["-un"]).unwrap_or_default();
-        steps.push(("Adding you to the punktfunk group".into(), Box::new(move || root("usermod", &["-aG", "punktfunk", &user]).map(drop))));
+        steps.push((format!("Adding you to the {group} group"), Box::new(move || root("usermod", &["-aG", group, &user]).map(drop))));
     }
     steps.push((format!("Installing plugover {VERSION}"), Box::new(|| install_self(&host_bin(), false))));
     steps.push(("Starting the host service".into(), Box::new(start_host)));
@@ -617,7 +651,7 @@ fn plan_uninstall(found: &Found, ctx: &Ctx) -> Result<Plan> {
         println!("  {} {}", paint(GOOD.bold(), done), paint(DIM, "The usbip kernel modules stay; they come with your kernel."));
         Ok(())
     });
-    Ok(Plan { lines, steps, root: relay || (host && Path::new(UHID_RULE).exists()), after })
+    Ok(Plan { lines, steps, root: relay || (host && (Path::new(UHID_RULE).exists() || Path::new(VHCI_RULE).exists())), after })
 }
 
 fn remove_relay(purge: bool) -> Result<()> {
@@ -646,6 +680,11 @@ fn remove_host(purge: bool) -> Result<()> {
     super::unhook_streaming_hosts();
     if Path::new(UHID_RULE).exists() {
         root("rm", &["-f", UHID_RULE])?;
+    }
+    if Path::new(VHCI_RULE).exists() {
+        root("rm", &["-f", VHCI_RULE])?;
+        // Members lose it at their next login; the files keep the group until the next boot.
+        let _ = root("groupdel", &["plugover"]);
     }
     let bin = unit_bin(&host_unit());
     let _ = exec(Command::new("systemctl").args(["--user", "disable", "--now", "plugover-host"]));

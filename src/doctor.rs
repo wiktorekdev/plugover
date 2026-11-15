@@ -128,11 +128,10 @@ fn check_host(endpoint: &Path) -> bool {
             ok("Plugging devices in", "allowed for this user");
         } else {
             healthy = false;
-            fail(
-                "Plugging devices in",
-                "not allowed for this user",
-                Some("punktfunk-host's udev rule allows the punktfunk group: sudo usermod -aG punktfunk $USER, then log in again"),
-            );
+            fail("Plugging devices in", "not allowed for this user", Some(&format!("{} sets it up; then log in again", cmd("plugover setup --host"))));
+        }
+        if crate::setup::console_lacks_plugin() {
+            warn("punktfunk console", "has no Plugover page", Some(&format!("{} adds it", cmd("plugover setup --host"))));
         }
     }
     #[cfg(windows)]

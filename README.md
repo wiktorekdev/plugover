@@ -232,7 +232,8 @@ plugover doctor --report   # everything a bug report needs, as plain text
 | The relay is not found | Check that it is on and that its firewall allows TCP 7275 and UDP 5353. You can also pair by address: `plugover pair 192.168.1.50`. |
 | The relay shows as offline | Run `plugover doctor` on the relay. |
 | A device does not connect | Its row in the console, `plugover status` and `plugover doctor` say why. |
-| Right after installing the host on Linux, doctor says plugging devices in is not allowed | Log out and back in once; setup added you to the `punktfunk` group. |
+| Right after installing the host on Linux, doctor says plugging devices in is not allowed | Log out and back in once; setup added you to the `punktfunk` group (or, without punktfunk, to a `plugover` group of its own). |
+| You installed or removed punktfunk or Sunshine after Plugover | Run `plugover setup --host` again: it adds the console page or the Sunshine hook, and moves plugging devices in to whichever group is there. `plugover doctor` says when it is needed. |
 | Force feedback stutters | Check the latency next to the relay. Wi-Fi is the usual cause; connect both machines by cable. |
 | Setup says a kernel module is missing | See [Requirements](#requirements). |
 | A relay "cannot encrypt, so its devices do not connect" | It runs Plugover older than 0.6. Update it; see [Security](#security). |
