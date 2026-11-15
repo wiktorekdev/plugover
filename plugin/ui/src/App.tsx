@@ -882,11 +882,9 @@ function BluetoothPairing({ relay, onClose, refresh }: { relay: Relay; onClose: 
 			{nearby?.map((d) => (
 				<BluetoothRow key={d.address} device={d} busy={busy} run={run} />
 			))}
-			{nearby?.length === 0 && !scanning && <p className="border-b border-border p-4 text-sm text-muted-foreground">Nothing found nearby.</p>}
-			<p className="p-4 text-sm text-muted-foreground">
-				Not listed? Put it in pairing mode until its light flashes quickly: Share and PS on a PlayStation controller, the pair
-				button on an Xbox controller, Sync on a Switch controller. Then look again.
-			</p>
+			{nearby?.length === 0 && !scanning && (
+				<p className="p-4 text-sm text-muted-foreground">Nothing found. Put the controller in pairing mode and look again.</p>
+			)}
 		</Card>
 	);
 }
@@ -901,7 +899,7 @@ function BluetoothRow({
 	const mine = busy === d.address;
 	const name = d.name || d.address;
 	return (
-		<div className="flex flex-wrap items-center gap-4 border-b border-border p-4">
+		<div className="flex flex-wrap items-center gap-4 border-b border-border p-4 last:border-0">
 			<div className={cn("grid size-11 shrink-0 place-items-center rounded-xl bg-neutral-accent text-primary", !d.connected && "opacity-60")}>
 				<Icon className="size-6" />
 			</div>
