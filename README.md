@@ -124,10 +124,11 @@ Only what is marked tested has been tried on real hardware.
 |---|---|
 | Linux relay and host, x86_64 | **Tested** (Ubuntu 24.04 relay, EndeavourOS host) |
 | Linux on ARM (Raspberry Pi) | not tested |
-| Windows relay or host | not tested |
+| Windows host | **Tested** |
+| Windows relay | 0.7.x still unverified |
 | punktfunk | **Tested** |
-| Sunshine on Linux | **Tested** (native package; the Flatpak hangs on KDE with NVIDIA) |
-| Sunshine forks, Sunshine on Windows | not tested |
+| Sunshine on Linux | **Tested** |
+| Sunshine on Windows | not tested |
 | Parsec, Steam Remote Play | experimental, not tested with a real stream |
 | Bluetooth, Linux to Linux | **Tested** with DualShock 4 (relay and host on one machine) |
 | Logitech G29 (`046d:c24f`) | **Tested** |
