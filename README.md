@@ -195,7 +195,8 @@ storage and network adapters are never shared. Set `NO_COLOR=1` to turn off colo
 | Streaming app | Status |
 |---|---|
 | punktfunk | **Tested** |
-| Sunshine and forks on Linux | Hook built and run against a stand-in, and from inside the Sunshine Flatpak's sandbox; no real stream yet (the Flatpak's screen capture hung on KDE with NVIDIA before the hook ran) |
+| Sunshine on Linux | **Tested** with a native Sunshine and Moonlight: start, stop, and a Sunshine crash mid-stream. Sunshine's Flatpak hung in its screen capture on KDE with NVIDIA before running any prep command; use the native package there |
+| Sunshine's forks on Linux | Same hook, not tested yet |
 | Sunshine and forks on Windows | Built, not tested yet |
 | Wolf | Built and tested against a stand-in socket, not with a real Wolf yet |
 | Parsec | Built and tested against logged lines from others; not with a real Parsec yet |

@@ -437,7 +437,11 @@ hardware and recorded in the README compatibility tables.
   `flatpak-spawn --host` from inside the Sunshine sandbox, started and ended a session. A real
   launch never reached the prep commands: Sunshine probes encoders first, and its second XDG portal
   session (`RemoteDesktop CreateSession`) got no answer, so the launch hung. KMS capture is not
-  available to the Flatpak. Next try: a native Sunshine with KMS capture.
+  available to the Flatpak.
+- Verified 2026-11-15 with a native Sunshine (AUR `sunshine-bin` 2026.914, KMS capture with
+  `cap_sys_admin`) and native Moonlight 6.2 on this machine: launching Desktop ran the do-command
+  and the daemon's session started; quitting the app ran the undo-command and it ended; killing
+  Sunshine mid-stream ended it 14 s later through the port probe.
 - Not covered: Moonshine and Wolf (no prep commands), Rubylight (Rust rewrite; its API not read).
 
 **Phase 3: reliability** (take-over done in the working tree, not released)
