@@ -7,6 +7,14 @@ export type Status = { host: string,
  */
 version: string, 
 /**
- * A punktfunk stream is running.
+ * A stream is running.
  */
-session: boolean, relays: Array<RelayStatus>, };
+session: boolean, 
+/**
+ * What says so: "punktfunk", "cli", or another source; empty from daemons before 0.7.
+ */
+sessions: Array<string>, 
+/**
+ * Something here reports streams, so devices in auto mode connect only during them.
+ */
+watching: boolean, relays: Array<RelayStatus>, };

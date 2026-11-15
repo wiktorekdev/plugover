@@ -97,9 +97,13 @@ for a new one. A code works once, for 15 minutes.
 ## Using it
 
 The **Plugover** page in the punktfunk console shows each paired relay, how quickly it answers and
-the devices plugged into it. Turn a device on and it connects whenever a stream runs. Its details
-let you:
+the devices plugged into it. Without punktfunk, `plugover ui` opens the same page in your browser.
 
+Turn a device on and it connects when you play. By default that is automatic: while something on
+the host reports streams (the punktfunk plugin, or `plugover session`), it connects only during
+streams; otherwise it stays connected. A device's details let you:
+
+- choose when it connects: automatically, always, or only during streams,
 - keep auto-connect to one port, when two of the same model are plugged in,
 - fix a wrong name or device kind.
 
@@ -112,6 +116,9 @@ plugover status                          # paired relays, their devices and the 
 plugover pair                            # find a relay on the network and pair with it
 plugover auto 046d:c24f on               # connect a device whenever a stream runs
 plugover auto 046d:c24f on --port 1-2    # only the one plugged into this port
+plugover auto 046d:c24f on --mode always # stay connected, stream or not (also: auto, session)
+plugover ui                              # open the Plugover page in a browser
+plugover session start --source myapp    # tell Plugover a stream started (stop when it ends)
 plugover attach 1-2                      # connect a device now (plugover detach 1-2 to give it back)
 plugover label 0fd9:0080 --name "Stream Deck" --kind other   # fix a name or kind
 plugover forget simrig                   # remove a relay

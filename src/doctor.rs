@@ -148,7 +148,12 @@ fn check_host(endpoint: &Path) -> bool {
     };
     let daemon = (!status.version.is_empty()).then_some(status.version.as_str());
     if daemon == Some(proto::VERSION) {
-        ok("Host daemon", if status.session { "running, a stream is on" } else { "running, no stream" });
+        let stream = match status.sessions.as_slice() {
+            [] if status.session => "running, a stream is on".to_string(),
+            [] => "running, no stream".to_string(),
+            from => format!("running, a stream is on ({})", from.join(", ")),
+        };
+        ok("Host daemon", stream);
     } else {
         let hint = if cfg!(windows) {
             "run the installer again to update it (or restart the 'Plugover host' scheduled task)"

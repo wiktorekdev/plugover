@@ -31,6 +31,9 @@ const SAMPLES: usize = 10;
 const RETRY: Duration = Duration::from_secs(5);
 /// How long after a device vanished one with the same maker on its port counts as the same one.
 const FOLLOW: Duration = Duration::from_secs(20);
+/// A source that reported streams this recently still watches them, so devices in auto mode
+/// connect only during streams. punktfunk's plugin reports every 10 s.
+const WATCH: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -48,6 +51,9 @@ pub enum Request {
         on: bool,
         #[serde(default)]
         port: Option<String>,
+        /// When it connects; left out, an existing rule keeps its mode and a new one is auto.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<state::Mode>,
     },
     /// Names a model, or corrects its kind; neither removes the label.
     Label {
@@ -61,11 +67,40 @@ pub enum Request {
     Detach { relay: Option<String>, busid: String },
     /// Allows connecting a relay's devices without encryption, for a relay too old to encrypt.
     Unencrypted { relay: String, on: bool },
-    /// The plugin sends this when a stream starts and stops.
-    Session { active: bool },
+    /// A one-time code for `plugover ui`. Not for the page itself, which cannot ask for one.
+    UiCode,
+    /// A stream started or stopped. Each `source` (the punktfunk plugin, a host app's hook, the
+    /// CLI) holds its own lease; a stream runs while any lease does. With `ttl` (seconds) a lease
+    /// ends by itself unless renewed, for sources that may die without saying stop.
+    Session {
+        active: bool,
+        #[serde(default = "punktfunk")]
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl: Option<u64>,
+    },
+}
+
+/// Who sent a session request that names no source: the punktfunk plugin, the only sender
+/// before 0.7.
+fn punktfunk() -> String {
+    "punktfunk".into()
 }
 
 type Slot = (String, String); // (relay id, busid)
+
+/// Whether `d` should be plugged in here now, given its rules, and if so whether it stays outside
+/// streams. Without a rule, a device that came back with another id is followed in the mode the
+/// one before it had.
+fn wanted(rules: &[AutoRule], relay: &str, d: &proto::DeviceInfo, track: Option<&Track>, session: bool, watching: bool) -> Option<bool> {
+    let matched: Vec<&AutoRule> = rules.iter().filter(|a| a.matches(relay, d)).collect();
+    let always = if matched.is_empty() {
+        track.filter(|t| t.follows(d))?.always
+    } else {
+        matched.iter().any(|a| a.always(watching))
+    };
+    (session || always).then_some(always)
+}
 
 /// What happened to one device while the daemon runs.
 #[derive(Default)]
@@ -74,6 +109,8 @@ struct Track {
     id: String,
     /// When it last vanished while plugged in.
     dropped: Option<Instant>,
+    /// It was plugged in to stay outside streams too; a device that follows it does as well.
+    always: bool,
     history: api::History,
 }
 
@@ -97,14 +134,25 @@ pub struct Daemon {
     errors: Mutex<HashMap<String, String>>,
     /// Devices we plugged in, and the vhci port each one landed on.
     attached: Mutex<HashMap<Slot, vhci::Attachment>>,
-    /// Detached by hand during this stream; not plugged back in until the next one.
+    /// Detached by hand; not plugged back in until the next stream, or until you plug it in or
+    /// turn it on again.
     held: Mutex<HashSet<Slot>>,
+    /// Plugged in by hand; stays until you unplug it or a stream ends.
+    manual: Mutex<HashSet<Slot>>,
     /// Why plugging a chosen device in failed, and when, while it keeps failing.
     failed: Mutex<HashMap<Slot, (String, Instant)>>,
     /// Latest round trips to each relay.
     rtt: Mutex<HashMap<String, VecDeque<Duration>>>,
     tracks: Mutex<HashMap<Slot, Track>>,
     watched: Mutex<HashSet<String>>,
+    /// Sources that say a stream runs, and when their lease ends if they set one.
+    leases: Mutex<HashMap<String, Option<Instant>>>,
+    /// When each source last said anything about streams.
+    heard: Mutex<HashMap<String, Instant>>,
+    started: Instant,
+    /// Who may use the page `plugover ui` opens.
+    pub ui: crate::ui::Gate,
+    /// Some lease holds, as last applied.
     session: AtomicBool,
     reconciling: Mutex<()>,
 }
@@ -113,17 +161,26 @@ impl Daemon {
     pub fn open(sys: PathBuf, config_path: PathBuf) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             sys,
-            cfg: Mutex::new(state::load(&config_path)?),
+            cfg: Mutex::new({
+                let mut cfg: HostConfig = state::load(&config_path)?;
+                cfg.remembered_sources();
+                cfg
+            }),
             config_path,
             name: state::hostname(),
             live: Mutex::default(),
             errors: Mutex::default(),
             attached: Mutex::default(),
             held: Mutex::default(),
+            manual: Mutex::default(),
             failed: Mutex::default(),
             rtt: Mutex::default(),
             tracks: Mutex::default(),
             watched: Mutex::default(),
+            leases: Mutex::default(),
+            heard: Mutex::default(),
+            started: Instant::now(),
+            ui: crate::ui::Gate::new(),
             session: AtomicBool::new(false),
             reconciling: Mutex::default(),
         }))
@@ -134,6 +191,8 @@ impl Daemon {
         for id in ids {
             self.watch(id);
         }
+        let page = self.clone();
+        thread::spawn(move || crate::ui::serve(page));
         let me = self.clone();
         // Also notices a device that dropped out, to plug it in again; reading vhci's status is cheap.
         thread::spawn(move || loop {
@@ -272,20 +331,47 @@ impl Daemon {
         Ok(false)
     }
 
-    /// Notes that the device on `slot` is plugged in here as `id`.
-    fn plugged(&self, slot: &Slot, id: &str) {
+    /// Notes that the device on `slot` is plugged in here as `id`, to stay outside streams too
+    /// with `always`.
+    fn plugged(&self, slot: &Slot, id: &str, always: bool) {
         let mut tracks = self.tracks.lock().unwrap();
         let t = tracks.entry(slot.clone()).or_default();
         if t.dropped.is_some() && t.id != id && !t.id.is_empty() {
             eprintln!("{} came back as {id}; following it", slot.1);
         }
-        (t.id, t.dropped) = (id.to_string(), None);
+        (t.id, t.dropped, t.always) = (id.to_string(), None, always);
     }
 
-    /// Makes reality match the plan: forgets devices the kernel dropped and, while a stream
-    /// runs, plugs in every chosen device that is available.
+    /// Something here reports streams: a source holds a lease or spoke recently, or, for a while
+    /// after a restart, one did before.
+    fn watching(&self) -> bool {
+        !self.sessions().is_empty()
+            || self.heard.lock().unwrap().values().any(|at| at.elapsed() < WATCH)
+            || (self.started.elapsed() < WATCH && !self.cfg.lock().unwrap().remembered_sources().is_empty())
+    }
+
+    /// Whether the attached device on `slot` stays when no stream runs: by its rule, or, without
+    /// one, by how it was plugged in (a device that followed one, say). Never one plugged in by hand.
+    fn stays(&self, slot: &Slot, watching: bool) -> bool {
+        if self.manual.lock().unwrap().contains(slot) {
+            return false;
+        }
+        let (cfg, live) = (self.cfg.lock().unwrap(), self.live.lock().unwrap());
+        let Some(d) = live.get(&slot.0).and_then(|s| s.devices.iter().find(|d| d.busid == slot.1)) else { return false };
+        let rules: Vec<&AutoRule> = cfg.auto.iter().filter(|a| a.matches(&slot.0, d)).collect();
+        if rules.is_empty() {
+            return self.tracks.lock().unwrap().get(slot).is_some_and(|t| t.always);
+        }
+        rules.iter().any(|a| a.always(watching))
+    }
+
+    /// Makes reality match the plan: forgets devices the kernel dropped, unplugs devices whose
+    /// rule does not want them now, and plugs in every chosen device that is available and
+    /// wanted now (always, or while a stream runs).
     fn reconcile(&self) {
         let Ok(_pass) = self.reconciling.try_lock() else { return };
+        // A lease that ran out ends the stream like a stop would.
+        self.apply_session();
         let mut dropped = Vec::new();
         self.attached.lock().unwrap().retain(|slot, a| {
             let alive = vhci::alive(&self.sys, a);
@@ -296,16 +382,34 @@ impl Daemon {
         });
         for slot in dropped {
             eprintln!("{} dropped out", slot.1);
+            self.manual.lock().unwrap().remove(&slot);
             let mut tracks = self.tracks.lock().unwrap();
             let t = tracks.entry(slot).or_default();
             t.dropped = Some(Instant::now());
             t.history.drops += 1;
             t.history.last_drop = Some(state::now());
         }
-        if !self.session.load(Ordering::SeqCst) {
-            return;
+        let (session, watching) = (self.session.load(Ordering::SeqCst), self.watching());
+        // A rule that now wants its device only during streams (its mode changed, or a source
+        // started watching) gives it back.
+        let unwanted: Vec<Slot> = {
+            let (attached, manual) = (self.attached.lock().unwrap(), self.manual.lock().unwrap());
+            let candidates: Vec<Slot> = attached.keys().filter(|s| !manual.contains(*s)).cloned().collect();
+            drop((attached, manual));
+            let (cfg, live) = (self.cfg.lock().unwrap(), self.live.lock().unwrap());
+            candidates
+                .into_iter()
+                .filter(|(r, busid)| {
+                    let Some(d) = live.get(r).and_then(|s| s.devices.iter().find(|d| d.busid == *busid)) else { return false };
+                    let rules: Vec<&AutoRule> = cfg.auto.iter().filter(|a| a.matches(r, d)).collect();
+                    !session && !rules.is_empty() && !rules.iter().any(|a| a.always(watching))
+                })
+                .collect()
+        };
+        if !unwanted.is_empty() {
+            self.unplug(|slot| unwanted.contains(slot));
         }
-        let todo: Vec<(PairedRelay, String, String)> = {
+        let todo: Vec<(PairedRelay, String, String, bool)> = {
             let (cfg, live) = (self.cfg.lock().unwrap(), self.live.lock().unwrap());
             let (attached, held, failed) = (self.attached.lock().unwrap(), self.held.lock().unwrap(), self.failed.lock().unwrap());
             let tracks = self.tracks.lock().unwrap();
@@ -317,25 +421,28 @@ impl Daemon {
                         .iter()
                         .filter(|d| {
                             let slot = (relay.id.clone(), d.busid.clone());
-                            let wanted = cfg.auto.iter().any(|rule| rule.matches(&relay.id, d)) || tracks.get(&slot).is_some_and(|t| t.follows(d));
-                            wanted
+                            wanted(&cfg.auto, &relay.id, d, tracks.get(&slot), session, watching).is_some()
                                 && d.identity.blocked.is_none()
                                 && d.lent_to.is_none()
                                 && !attached.contains_key(&slot)
                                 && !held.contains(&slot)
                                 && failed.get(&slot).is_none_or(|(_, at)| at.elapsed() >= RETRY)
                         })
-                        .map(|d| (relay.clone(), d.busid.clone(), d.id.clone()))
+                        .filter_map(|d| {
+                            let always = wanted(&cfg.auto, &relay.id, d, tracks.get(&(relay.id.clone(), d.busid.clone())), session, watching)?;
+                            Some((relay.clone(), d.busid.clone(), d.id.clone(), always))
+                        })
                         .collect::<Vec<_>>()
                 })
                 .collect()
         };
-        for (relay, busid, id) in todo {
+        for (relay, busid, id, always) in todo {
             let slot = (relay.id.clone(), busid);
             match self.encryption(&relay).and_then(|encrypt| vhci::attach(&self.sys, &relay, &slot.1, encrypt)) {
                 Ok(a) => {
                     eprintln!("plugged in {} from {} (port {})", slot.1, relay.name, a.port);
-                    self.plugged(&slot, &id);
+                    self.plugged(&slot, &id, always);
+                    self.manual.lock().unwrap().remove(&slot);
                     self.failed.lock().unwrap().remove(&slot);
                     self.attached.lock().unwrap().insert(slot, a);
                 }
@@ -355,9 +462,41 @@ impl Daemon {
         }
     }
 
-    fn set_session(&self, active: bool) {
+    fn set_session(&self, source: &str, active: bool, ttl: Option<Duration>) {
         let _pass = self.reconciling.lock().unwrap();
-        // The plugin repeats the current state now and then; only a change does anything.
+        self.heard.lock().unwrap().insert(source.to_string(), Instant::now());
+        {
+            let mut cfg = self.cfg.lock().unwrap();
+            if !cfg.remembered_sources().iter().any(|s| s == source) {
+                cfg.remembered_sources().push(source.to_string());
+                if let Err(e) = self.save(&cfg) {
+                    eprintln!("could not note {source} as a stream source: {e:#}");
+                }
+            }
+        }
+        let mut leases = self.leases.lock().unwrap();
+        if active {
+            leases.insert(source.to_string(), ttl.map(|t| Instant::now() + t));
+        } else {
+            leases.remove(source);
+        }
+        drop(leases);
+        self.apply_session();
+    }
+
+    /// Sources whose lease holds, dropping the ones that ran out.
+    fn sessions(&self) -> Vec<String> {
+        let mut leases = self.leases.lock().unwrap();
+        leases.retain(|_, until| until.is_none_or(|u| Instant::now() < u));
+        let mut held: Vec<String> = leases.keys().cloned().collect();
+        held.sort();
+        held
+    }
+
+    /// Starts or ends the stream when the leases say so. The caller holds `reconciling`.
+    fn apply_session(&self) {
+        let active = !self.sessions().is_empty();
+        // Sources repeat the current state now and then; only a change does anything.
         if self.session.swap(active, Ordering::SeqCst) == active {
             return;
         }
@@ -366,7 +505,10 @@ impl Daemon {
             self.held.lock().unwrap().clear();
             return;
         }
-        self.unplug(|_| true);
+        let watching = self.watching();
+        let slots: Vec<Slot> = self.attached.lock().unwrap().keys().cloned().collect();
+        let going: Vec<Slot> = slots.into_iter().filter(|s| !self.stays(s, watching)).collect();
+        self.unplug(|slot| going.contains(slot));
     }
 
     /// Unplugs the attached devices `which` picks. One that will not unplug stays tracked, so it
@@ -377,7 +519,10 @@ impl Daemon {
                 return true;
             }
             match vhci::detach(&self.sys, a) {
-                Ok(()) => false,
+                Ok(()) => {
+                    self.manual.lock().unwrap().remove(slot);
+                    false
+                }
                 Err(e) => {
                     eprintln!("could not unplug {}: {e:#}", slot.1);
                     true
@@ -404,7 +549,7 @@ impl Daemon {
         self.unplug(|slot| gone.contains(slot));
     }
 
-    fn handle(self: &Arc<Self>, req: Request) -> Result<Value> {
+    pub fn handle(self: &Arc<Self>, req: Request) -> Result<Value> {
         Ok(match req {
             Request::Status => reply(self.status())?,
             Request::Discover => {
@@ -449,16 +594,25 @@ impl Daemon {
                 self.tracks.lock().unwrap().retain(|(r, _), _| *r != id);
                 json!({ "ok": true })
             }
-            Request::Auto { relay, device, on, port } => {
+            Request::Auto { relay, device, on, port, mode } => {
                 let (relay, device) = (self.pick(relay.as_deref())?.id, state::device_id(&device)?);
-                let title = self.live.lock().unwrap().get(&relay).and_then(|snap| {
-                    snap.devices.iter().find(|d| d.id == device).map(|d| d.identity.title.clone())
-                });
+                let (title, busids) = {
+                    let live = self.live.lock().unwrap();
+                    let here = live.get(&relay).map_or(&[][..], |s| &s.devices[..]).iter().filter(|d| d.id == device);
+                    let busids: Vec<String> = here.clone().map(|d| d.busid.clone()).collect();
+                    (here.map(|d| d.identity.title.clone()).next(), busids)
+                };
                 let mut cfg = self.cfg.lock().unwrap();
-                state::set_auto(&mut cfg.auto, AutoRule { relay: relay.clone(), device: device.clone(), title, port }, on);
+                let mode = mode
+                    .or_else(|| cfg.auto.iter().find(|a| a.relay == relay && a.device == device && (port.is_none() || a.port == port)).map(|a| a.mode))
+                    .unwrap_or_default();
+                state::set_auto(&mut cfg.auto, AutoRule { relay: relay.clone(), device: device.clone(), title, port: port.clone(), mode }, on);
                 self.save(&cfg)?;
                 drop(cfg);
-                if !on {
+                if on {
+                    // Turning it on again undoes unplugging it by hand.
+                    self.held.lock().unwrap().retain(|(r, b)| !(*r == relay && busids.contains(b) && port.as_ref().is_none_or(|p| p == b)));
+                } else {
                     self.release(&relay, &device);
                 }
                 self.reconcile();
@@ -477,8 +631,10 @@ impl Daemon {
                 let port = a.port;
                 let slot = (relay.id.clone(), busid);
                 let id = self.live.lock().unwrap().get(&relay.id).and_then(|s| s.devices.iter().find(|d| d.busid == slot.1).map(|d| d.id.clone()));
-                self.plugged(&slot, &id.unwrap_or_default());
-                self.attached.lock().unwrap().insert(slot, a);
+                self.plugged(&slot, &id.unwrap_or_default(), false);
+                self.held.lock().unwrap().remove(&slot);
+                self.attached.lock().unwrap().insert(slot.clone(), a);
+                self.manual.lock().unwrap().insert(slot);
                 json!({ "ok": true, "port": port })
             }
             Request::Detach { relay, busid } => {
@@ -489,6 +645,7 @@ impl Daemon {
                 vhci::detach(&self.sys, a)?;
                 attached.remove(&slot);
                 drop(attached);
+                self.manual.lock().unwrap().remove(&slot);
                 self.held.lock().unwrap().insert(slot);
                 json!({ "ok": true })
             }
@@ -508,8 +665,11 @@ impl Daemon {
                 self.reconcile();
                 json!({ "ok": true })
             }
-            Request::Session { active } => {
-                self.set_session(active);
+            Request::UiCode => json!({ "ok": true, "code": self.ui.code(), "port": crate::ui::PORT }),
+            Request::Session { active, source, ttl } => {
+                anyhow::ensure!(!source.is_empty() && source.len() <= 64, "a session source needs a short name");
+                anyhow::ensure!(ttl.is_none_or(|t| (1..=86_400).contains(&t)), "a session lease lasts 1 second to 1 day");
+                self.set_session(&source, active, ttl.map(Duration::from_secs));
                 self.reconcile();
                 json!({ "ok": true })
             }
@@ -517,6 +677,7 @@ impl Daemon {
     }
 
     fn status(&self) -> api::Status {
+        let (watching, sessions) = (self.watching(), self.sessions());
         let (cfg, live) = (self.cfg.lock().unwrap(), self.live.lock().unwrap());
         let (attached, errors) = (self.attached.lock().unwrap(), self.errors.lock().unwrap());
         let (failed, rtt, tracks) = (self.failed.lock().unwrap(), self.rtt.lock().unwrap(), self.tracks.lock().unwrap());
@@ -538,6 +699,8 @@ impl Daemon {
                         state: if here { api::DeviceState::Here } else if d.lent_to.is_some() { api::DeviceState::Elsewhere } else { api::DeviceState::Free },
                         auto: !matched.is_empty(),
                         auto_port: matched.iter().any(|a| a.port.is_some()),
+                        mode: matched.first().map(|a| a.mode).unwrap_or_default(),
+                        always: matched.iter().any(|a| a.always(watching)),
                         error: (!here && d.lent_to.is_none() && !matched.is_empty()).then(|| failed.get(&slot).map(|(why, _)| why.clone())).flatten(),
                         history: tracks.get(&slot).map(|t| t.history.clone()).unwrap_or_default(),
                     }
@@ -575,7 +738,7 @@ impl Daemon {
                 }
             })
             .collect();
-        api::Status { host: self.name.clone(), version: proto::VERSION.into(), session: self.session.load(Ordering::SeqCst), relays }
+        api::Status { host: self.name.clone(), version: proto::VERSION.into(), session: self.session.load(Ordering::SeqCst), sessions, watching, relays }
     }
 
     fn answer<S: Read + Write>(me: &Arc<Self>, read: S, mut write: S, token: Option<&str>) {
@@ -701,6 +864,122 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_runs_while_any_source_holds_a_lease() {
+        // What the punktfunk plugin of 0.6 sends: no source, so it is punktfunk's lease.
+        let Ok(Request::Session { active: true, source, ttl: None }) = parse(r#"{"op":"session","active":true}"#, None) else { panic!() };
+        assert_eq!(source, "punktfunk");
+
+        let root = std::env::temp_dir().join(format!("plugover-hostd-leases-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let d = Daemon::open(root.join("sys"), root.join("host.toml")).unwrap();
+        let on = || d.session.load(Ordering::SeqCst);
+        let session = |source: &str, active: bool| d.handle(Request::Session { active, source: source.into(), ttl: None }).unwrap();
+
+        session("punktfunk", true);
+        session("cli", true);
+        assert_eq!(d.status().sessions, ["cli", "punktfunk"]);
+        session("punktfunk", false);
+        assert!(on(), "the CLI still says a stream runs");
+        session("cli", false);
+        assert!(!on() && d.status().sessions.is_empty());
+
+        // A lease that is not renewed ends the stream by itself.
+        d.set_session("sunshine", true, Some(Duration::from_millis(50)));
+        assert!(on());
+        thread::sleep(Duration::from_millis(80));
+        d.reconcile();
+        assert!(!on(), "the lease ran out");
+
+        assert!(d.handle(Request::Session { active: true, source: String::new(), ttl: None }).is_err());
+        assert!(d.handle(Request::Session { active: true, source: "x".into(), ttl: Some(u64::MAX) }).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn device(busid: &str, id: &str) -> proto::DeviceInfo {
+        proto::DeviceInfo {
+            busid: busid.into(),
+            id: id.into(),
+            identity: catalog::Identity {
+                title: "wheel".into(),
+                name: "wheel".into(),
+                maker: String::new(),
+                kind: catalog::Kind::Wheel,
+                source: catalog::Source::Unknown,
+                blocked: None,
+            },
+            lent_to: None,
+        }
+    }
+
+    fn rule(device: &str, mode: state::Mode) -> AutoRule {
+        AutoRule { relay: "r".into(), device: device.into(), title: None, port: None, mode }
+    }
+
+    #[test]
+    fn modes_decide_when_a_device_is_wanted() {
+        use state::Mode::*;
+        let d = device("1-2", "046d:c24f");
+        let want = |mode, session, watching| wanted(&[rule("046d:c24f", mode)], "r", &d, None, session, watching);
+        assert_eq!(want(Auto, false, false), Some(true), "nothing reports streams: always");
+        assert_eq!(want(Auto, false, true), None, "something does: only during streams");
+        assert_eq!(want(Auto, true, true), Some(false));
+        assert_eq!(want(Always, false, true), Some(true));
+        assert_eq!(want(Session, false, false), None);
+        assert_eq!(want(Session, true, false), Some(false));
+        assert_eq!(wanted(&[], "r", &d, None, true, true), None, "no rule, nothing to follow");
+
+        // The G29 comes back as another product; it keeps the mode it was plugged in with.
+        let track = |always| Track { id: "046d:c294".into(), dropped: Some(Instant::now()), always, history: api::History::default() };
+        assert_eq!(wanted(&[], "r", &d, Some(&track(true)), false, true), Some(true));
+        assert_eq!(wanted(&[], "r", &d, Some(&track(false)), false, true), None);
+        assert_eq!(wanted(&[], "r", &d, Some(&track(false)), true, true), Some(false));
+    }
+
+    #[test]
+    fn sources_that_report_streams_are_remembered() {
+        let root = std::env::temp_dir().join(format!("plugover-hostd-watch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let d = Daemon::open(root.join("sys"), root.join("host.toml")).unwrap();
+        assert!(!d.watching(), "a fresh host with nothing reporting streams");
+        d.set_session("punktfunk", false, None);
+        assert!(d.watching(), "a stop counts too: punktfunk is there, just not streaming");
+        assert!(d.status().watching);
+        // After a restart it has a while to speak up before auto devices connect outside streams.
+        let again = Daemon::open(root.join("sys"), root.join("host.toml")).unwrap();
+        assert_eq!(again.cfg.lock().unwrap().sources.as_deref(), Some(&["punktfunk".to_string()][..]));
+        assert!(again.watching());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stream_ending_keeps_only_what_stays_connected() {
+        let root = std::env::temp_dir().join(format!("plugover-hostd-end-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let vhci = root.join("sys/devices/platform/vhci_hcd.0");
+        fs::create_dir_all(&vhci).unwrap();
+        fs::write(vhci.join("detach"), "").unwrap();
+        let d = Daemon::open(root.join("sys"), root.join("host.toml")).unwrap();
+        let devices = vec![device("1-1", "046d:c24f"), device("1-2", "046d:c266"), device("1-3", "0eb7:0e04")];
+        d.live.lock().unwrap().insert(
+            "r".into(),
+            Snapshot { relay_id: "r".into(), relay: "rig".into(), devices, version: proto::VERSION.into(), encrypted: true },
+        );
+        d.cfg.lock().unwrap().auto = vec![rule("046d:c24f", state::Mode::Always), rule("046d:c266", state::Mode::Auto)];
+        for (port, busid) in [(1, "1-1"), (2, "1-2"), (3, "1-3")] {
+            d.attached.lock().unwrap().insert(("r".into(), busid.into()), vhci::Attachment { port });
+        }
+        d.manual.lock().unwrap().insert(("r".into(), "1-3".into()));
+
+        d.set_session("punktfunk", true, None);
+        d.set_session("punktfunk", false, None);
+        let left: Vec<String> = d.attached.lock().unwrap().keys().map(|(_, b)| b.clone()).collect();
+        assert_eq!(left, ["1-1"], "the always wheel stays; auto (punktfunk watches) and by-hand go back");
+        assert!(d.manual.lock().unwrap().is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn unencrypted_only_when_allowed_and_the_relay_cannot_encrypt() {
         let root = std::env::temp_dir().join(format!("plugover-hostd-crypt-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -730,20 +1009,8 @@ mod tests {
 
     #[test]
     fn a_device_that_comes_back_with_another_id_is_followed() {
-        let dev = |id: &str| proto::DeviceInfo {
-            busid: "1-2".into(),
-            id: id.into(),
-            identity: catalog::Identity {
-                title: "wheel".into(),
-                name: "wheel".into(),
-                maker: String::new(),
-                kind: catalog::Kind::Wheel,
-                source: catalog::Source::Unknown,
-                blocked: None,
-            },
-            lent_to: None,
-        };
-        let mut t = Track { id: "046d:c294".into(), dropped: Some(Instant::now()), history: api::History::default() };
+        let dev = |id: &str| device("1-2", id);
+        let mut t = Track { id: "046d:c294".into(), dropped: Some(Instant::now()), always: false, history: api::History::default() };
         assert!(t.follows(&dev("046d:c24f")), "same maker, new mode");
         assert!(!t.follows(&dev("045e:028e")), "another maker is another device");
         assert!(!t.follows(&dev("046d:c294")), "the same id is plugged in by its rule, if any");
@@ -765,8 +1032,8 @@ mod tests {
         d.attached.lock().unwrap().insert(slot.clone(), vhci::Attachment { port: 3 });
 
         // No vhci_hcd in this fake sysfs, so every detach fails.
-        d.set_session(true);
-        d.set_session(false);
+        d.set_session("punktfunk", true, None);
+        d.set_session("punktfunk", false, None);
         assert!(d.attached.lock().unwrap().contains_key(&slot), "a failed unplug at the end of a stream keeps the device");
         let req = || Request::Detach { relay: None, busid: "1-2".into() };
         assert!(d.handle(req()).is_err());

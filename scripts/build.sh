@@ -15,6 +15,7 @@ plugin_version=$(grep -m1 '"version"' plugin/package.json | cut -d'"' -f4)
 
 (cd plugin && bun install --frozen-lockfile && bun run build && rm -f ./*.tgz && bun pm pack)
 export PLUGOVER_PLUGIN=$PWD/plugin/punktfunk-plugin-plugover-$version.tgz
+export PLUGOVER_UI=$PWD/plugin/dist/ui
 # Build paths would otherwise end up in panic messages.
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=~"
 # Every target is a static musl build except Windows. ARM needs a writable zig lib dir because

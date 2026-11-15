@@ -17,6 +17,7 @@ mod state;
 mod sysfs;
 mod term;
 mod tls;
+mod ui;
 mod usbip;
 mod usbipd;
 mod vhci;
@@ -78,7 +79,8 @@ enum Cmd {
         #[arg(value_name = "on|off", value_parser = ["on", "off"])]
         state: String,
     },
-    /// Plug a device in whenever a stream runs.
+    /// Plug a device in when you stream: with --mode auto (the default for a new rule) only during
+    /// streams if something here reports them (punktfunk, `plugover session`), always otherwise.
     Auto {
         /// vendor:product, see `plugover status`.
         device: String,
@@ -91,6 +93,9 @@ enum Cmd {
         /// model are plugged in.
         #[arg(long)]
         port: Option<String>,
+        /// When it connects; an existing rule keeps its mode if you leave this out.
+        #[arg(long, value_enum)]
+        mode: Option<state::Mode>,
     },
     /// Name a device model or correct its kind, when Plugover gets it wrong.
     Label {
@@ -122,6 +127,8 @@ enum Cmd {
         #[arg(long)]
         relay: Option<String>,
     },
+    /// Open the Plugover page in your browser, for when you do not use the punktfunk console.
+    Ui,
     /// Check this machine's setup and say what to fix.
     Doctor {
         /// Print a plain-text report with the checks and recent logs, for a bug report.
@@ -204,11 +211,18 @@ enum Cmd {
         #[arg(long, default_value_os_t = config_dir().join("host.toml"))]
         config: PathBuf,
     },
-    /// Tell the daemon a stream started or stopped (the punktfunk plugin does this for you).
-    #[command(hide = true)]
+    /// Tell the host daemon a stream started or stopped, for streaming software Plugover does not
+    /// follow by itself (the punktfunk plugin does this for you).
     Session {
         #[arg(value_parser = ["start", "stop"])]
         state: String,
+        /// Who says so; each source starts and stops its own session.
+        #[arg(long, default_value = "cli")]
+        source: String,
+        /// End the session by itself after this many seconds unless repeated, for scripts that
+        /// may not get to say stop.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400))]
+        ttl: Option<u64>,
     },
 }
 
@@ -336,17 +350,44 @@ fn run(cli: Cli) -> Result<()> {
             };
             done(format!("{} now shows as {what}.", paint(ACCENT, &device)));
         }
-        Cmd::Auto { device, state, relay, port } => {
+        Cmd::Auto { device, state, relay, port, mode } => {
             let on = state == "on";
-            call(Request::Auto { relay, device: device.clone(), on, port: port.clone() })?;
+            call(Request::Auto { relay, device: device.clone(), on, port: port.clone(), mode })?;
             let what = match &port {
                 Some(p) => format!("{} on port {}", paint(ACCENT, &device), paint(BOLD, p)),
                 None => paint(ACCENT, &device),
             };
-            done(if on { format!("{what} connects whenever a stream runs.") } else { format!("Auto-connect is off for {what}.") });
+            let always = on && {
+                let st: api::Status = hostd::ask(&cli.socket, &Request::Status)?;
+                // Plugged into the relay, the daemon says; otherwise the mode does.
+                let id = state::device_id(&device)?;
+                let shown = st.relays.iter().flat_map(|r| &r.devices).find(|d| d.info.id == id && d.auto).map(|d| d.always);
+                shown.unwrap_or(match mode.unwrap_or_default() {
+                    state::Mode::Always => true,
+                    state::Mode::Session => false,
+                    state::Mode::Auto => !st.watching,
+                })
+            };
+            done(match (on, always) {
+                (false, _) => format!("Auto-connect is off for {what}."),
+                (true, true) => format!("{what} stays connected, with or without a stream."),
+                (true, false) => format!("{what} connects whenever a stream runs."),
+            });
         }
-        Cmd::Session { state } => {
-            call(Request::Session { active: state == "start" })?;
+        Cmd::Ui => {
+            anyhow::ensure!(!ui::UI.is_empty(), "this build of Plugover has no page inside; release builds from scripts/build.sh do");
+            let code = call(Request::UiCode)?;
+            let url = format!("http://127.0.0.1:{}/login?code={}", ui::PORT, code["code"].as_str().unwrap_or_default());
+            #[cfg(windows)]
+            let opened = std::process::Command::new("cmd").args(["/C", "start", "", &url]).status();
+            #[cfg(not(windows))]
+            let opened = std::process::Command::new("xdg-open").arg(&url).status();
+            if !opened.is_ok_and(|s| s.success()) {
+                println!("Open this address in a browser on this computer within a minute: {url}");
+            }
+        }
+        Cmd::Session { state, source, ttl } => {
+            call(Request::Session { active: state == "start", source, ttl })?;
         }
         Cmd::Attach { busid, relay } => {
             let v = call(Request::Attach { relay, busid: busid.clone() })?;

@@ -2,6 +2,7 @@
 import type { DeviceState } from "./DeviceState";
 import type { History } from "./History";
 import type { Kind } from "./Kind";
+import type { Mode } from "./Mode";
 import type { Source } from "./Source";
 
 export type DeviceStatus = { state: DeviceState, 
@@ -13,6 +14,14 @@ auto: boolean,
  * The auto-connect rule names this port, not only the model.
  */
 auto_port: boolean, 
+/**
+ * When it connects, as its rule says (auto without one).
+ */
+mode: Mode, 
+/**
+ * It connects outside streams too, with its mode as it works out here now.
+ */
+always: boolean, 
 /**
  * Why the last try to connect it failed, while it keeps failing.
  */

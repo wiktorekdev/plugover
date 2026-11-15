@@ -1,7 +1,7 @@
 //! What the host daemon reports, shared by the CLI, `doctor` and the console page. `cargo test`
 //! writes the console's TypeScript types from these into plugin/ui/src/generated/.
 
-use crate::proto::DeviceInfo;
+use crate::{proto::DeviceInfo, state::Mode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,8 +11,14 @@ pub struct Status {
     /// Plugover on this host; empty from daemons before 0.5.
     #[serde(default)]
     pub version: String,
-    /// A punktfunk stream is running.
+    /// A stream is running.
     pub session: bool,
+    /// What says so: "punktfunk", "cli", or another source; empty from daemons before 0.7.
+    #[serde(default)]
+    pub sessions: Vec<String>,
+    /// Something here reports streams, so devices in auto mode connect only during them.
+    #[serde(default)]
+    pub watching: bool,
     pub relays: Vec<RelayStatus>,
 }
 
@@ -55,6 +61,12 @@ pub struct DeviceStatus {
     /// The auto-connect rule names this port, not only the model.
     #[serde(default)]
     pub auto_port: bool,
+    /// When it connects, as its rule says (auto without one).
+    #[serde(default)]
+    pub mode: Mode,
+    /// It connects outside streams too, with its mode as it works out here now.
+    #[serde(default)]
+    pub always: bool,
     /// Why the last try to connect it failed, while it keeps failing.
     #[serde(default)]
     pub error: Option<String>,

@@ -19,6 +19,7 @@ import {
 	KIND_LABEL,
 	type Latency,
 	type Missing,
+	type Mode,
 	newer,
 	type Relay,
 	SOURCE_LABEL,
@@ -28,6 +29,13 @@ import {
 import { KIND_ICON } from "./icons";
 
 const POLL_MS = 2000;
+
+/** `watching`: something on this host reports streams, which decides what auto does. */
+const MODE_LABEL: Record<Mode, (watching: boolean) => string> = {
+	auto: (watching) => `Automatically (${watching ? "during streams" : "always, nothing reports streams"})`,
+	session: () => "Only during streams",
+	always: () => "Always",
+};
 const EMBEDDED = window.self !== window.top;
 const TOAST_COLORS = {
 	"--normal-bg": "var(--color-neutral)",
@@ -97,7 +105,7 @@ export function App() {
 			<>
 				<StreamBanner status={status} />
 				{status.relays.map((r) => (
-					<RelayView key={r.id} relay={r} hostVersion={status.version} session={status.session} refresh={refresh} />
+					<RelayView key={r.id} relay={r} hostVersion={status.version} session={status.session} watching={status.watching} refresh={refresh} />
 				))}
 				{/* Close under the last relay rather than a whole section gap away. */}
 				<div className="-mt-7">
@@ -140,7 +148,9 @@ function StreamBanner({ status }: { status: Status }) {
 							: "No devices connected"
 						: here.length > 0
 							? `${devices} connected outside a stream`
-							: "Devices you turn on connect when a stream starts."}
+							: status.watching
+								? "Devices you turn on connect when a stream starts."
+								: "Nothing here reports streams, so devices you turn on stay connected."}
 				</p>
 				{failing > 0 && <p className="text-sm text-destructive">{count(failing)} could not connect; see below.</p>}
 			</div>
@@ -330,8 +340,9 @@ function RelayView({
 	relay,
 	hostVersion,
 	session,
+	watching,
 	refresh,
-}: { relay: Relay; hostVersion?: string; session: boolean; refresh: () => Promise<void> }) {
+}: { relay: Relay; hostVersion?: string; session: boolean; watching: boolean; refresh: () => Promise<void> }) {
 	// Hubs, storage, network adapters and what the relay does not share are left out. Game devices
 	// come first, in a fixed order, so rows do not jump around when they are turned on or off.
 	const devices = relay.devices.filter((d) => !d.blocked).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.title.localeCompare(b.title));
@@ -454,7 +465,7 @@ function RelayView({
 			<div className="flex flex-col gap-2">
 				<Card padding={false}>
 					{devices.map((d) => (
-						<DeviceRow key={d.busid} relay={relay} device={d} twins={twins(d)} session={session} refresh={refresh} />
+						<DeviceRow key={d.busid} relay={relay} device={d} twins={twins(d)} session={session} watching={watching} refresh={refresh} />
 					))}
 					{missing.map((m) => (
 						<MissingRow key={`${m.id}-${m.port ?? ""}`} relay={relay} device={m} refresh={refresh} />
@@ -570,8 +581,9 @@ function DeviceRow({
 	device: d,
 	twins,
 	session,
+	watching,
 	refresh,
-}: { relay: Relay; device: Device; twins: boolean; session: boolean; refresh: () => Promise<void> }) {
+}: { relay: Relay; device: Device; twins: boolean; session: boolean; watching: boolean; refresh: () => Promise<void> }) {
 	const [open, setOpen] = useState(false);
 	/** What the switch is doing right now, which can take a few seconds during a stream. */
 	const [busy, setBusy] = useState<string>();
@@ -583,7 +595,9 @@ function DeviceRow({
 	};
 	const note =
 		busy ??
-		(d.state === "elsewhere" ? `In use by ${d.lent_to}` : d.auto && !here && !session ? "Connects when a stream starts" : undefined);
+		(d.state === "elsewhere" ? `In use by ${d.lent_to}` : d.auto && !here && !session && !d.always ? "Connects when a stream starts" : undefined);
+	// What turning it on does now: a new rule is in auto mode.
+	const connectsNow = session || (d.auto ? d.always : !watching);
 
 	return (
 		<div className="border-b border-border last:border-0">
@@ -606,13 +620,13 @@ function DeviceRow({
 					className={OFF_RING}
 					checked={d.auto}
 					disabled={busy !== undefined}
-					aria-label={`Use ${d.title} here during streams`}
+					aria-label={`Use ${d.title} here`}
 					onCheckedChange={(on) =>
 						run(
 							"auto",
 							{ device: d.id, on },
-							on ? (session ? `${d.title} connected` : `${d.title} connects when a stream starts`) : `${d.title} is free again`,
-							on ? (session ? "Connecting…" : "Saving…") : here ? "Releasing…" : "Saving…",
+							on ? (connectsNow ? `${d.title} connected` : `${d.title} connects when a stream starts`) : `${d.title} is free again`,
+							on ? (connectsNow ? "Connecting…" : "Saving…") : here ? "Releasing…" : "Saving…",
 						)
 					}
 				/>
@@ -648,6 +662,36 @@ function DeviceRow({
 							</dd>
 						</>
 					)}
+					{d.auto && (
+						<>
+							<dt className="pt-1.5 text-muted-foreground">Connects</dt>
+							<dd>
+								<Select
+									value={d.mode}
+									disabled={busy !== undefined}
+									onValueChange={(mode) =>
+										run(
+											"auto",
+											{ device: d.id, on: true, port: d.auto_port ? d.busid : undefined, mode },
+											`${d.title}: ${MODE_LABEL[mode as Mode](watching).toLowerCase()}`,
+											"Saving…",
+										)
+									}
+								>
+									<SelectTrigger size="sm" aria-label={`When ${d.title} connects`} className="w-64">
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										{(Object.keys(MODE_LABEL) as Mode[]).map((m) => (
+											<SelectItem key={m} value={m}>
+												{MODE_LABEL[m](watching)}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							</dd>
+						</>
+					)}
 					{d.auto && (twins || d.auto_port) && (
 						<>
 							<dt className="text-muted-foreground">Only this port</dt>
@@ -660,7 +704,7 @@ function DeviceRow({
 									onCheckedChange={(only) =>
 										run(
 											"auto",
-											{ device: d.id, on: true, port: only ? d.busid : undefined },
+											{ device: d.id, on: true, port: only ? d.busid : undefined, mode: d.mode },
 											only ? `Only the ${d.title} on port ${d.busid} connects` : `Any ${d.title} connects`,
 											"Saving…",
 										)
@@ -744,7 +788,7 @@ function MissingRow({ relay, device: m, refresh }: { relay: Relay; device: Missi
 					{relay.online ? `Not plugged into ${relay.name}${m.port ? ` at port ${m.port}` : ""}` : "Waiting for the relay"}
 				</p>
 			</div>
-			<Switch checked disabled={busy} aria-label={`Use ${m.title} here during streams`} onCheckedChange={off} />
+			<Switch checked disabled={busy} aria-label={`Use ${m.title} here`} onCheckedChange={off} />
 			{/* Where the details button sits in the other rows. */}
 			<div className="size-9 shrink-0" />
 		</div>

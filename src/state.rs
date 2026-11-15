@@ -71,6 +71,20 @@ pub struct HostConfig {
     /// Names and kinds set with `plugover label`, for devices Plugover gets wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label: Vec<Label>,
+    /// Sources that have reported streams here (punktfunk, a host app's hook). After a restart they
+    /// count as watching for a while, so devices in auto mode do not connect before they speak up.
+    /// None in a config from before 0.7; see `remembered_sources`.
+    #[serde(default)]
+    pub sources: Option<Vec<String>>,
+}
+
+impl HostConfig {
+    /// The sources, filled in for a config from before 0.7: rules made then were for punktfunk
+    /// streams, the only kind there was.
+    pub fn remembered_sources(&mut self) -> &mut Vec<String> {
+        let old_rules = !self.auto.is_empty();
+        self.sources.get_or_insert_with(|| if old_rules { vec!["punktfunk".into()] } else { Vec::new() })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,11 +144,42 @@ pub struct AutoRule {
     /// Only the device on this port (busid), for when several of the same model are plugged in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<String>,
+    #[serde(default, skip_serializing_if = "Mode::is_auto")]
+    pub mode: Mode,
 }
 
 impl AutoRule {
     pub fn matches(&self, relay: &str, device: &crate::proto::DeviceInfo) -> bool {
         self.relay == relay && self.device == device.id && self.port.as_ref().is_none_or(|p| *p == device.busid)
+    }
+
+    /// Connects outside streams too. `watching`: something here reports streams.
+    pub fn always(&self, watching: bool) -> bool {
+        match self.mode {
+            Mode::Auto => !watching,
+            Mode::Always => true,
+            Mode::Session => false,
+        }
+    }
+}
+
+/// When a chosen device connects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// During streams when something here reports them (punktfunk, a host app's hook), always
+    /// otherwise.
+    #[default]
+    Auto,
+    Always,
+    /// Only while a stream runs.
+    Session,
+}
+
+impl Mode {
+    fn is_auto(&self) -> bool {
+        *self == Mode::Auto
     }
 }
 
@@ -213,8 +258,9 @@ mod tests {
                 encrypts: true,
                 unencrypted: false,
             }],
-            auto: vec![AutoRule { relay: "ab".into(), device: "046d:c24f".into(), title: Some("Logitech G29".into()), port: None }],
+            auto: vec![AutoRule { relay: "ab".into(), device: "046d:c24f".into(), title: Some("Logitech G29".into()), port: None, mode: Mode::Always }],
             label: Vec::new(),
+            sources: Some(vec!["punktfunk".into()]),
         };
         let mut cfg = cfg;
         set_label(&mut cfg.label, "0fd9:0080".into(), Some(" Stream Deck ".into()), None).unwrap();
@@ -225,7 +271,12 @@ mod tests {
         assert_eq!(cfg.label, [Label { device: "0fd9:0080".into(), name: None, kind: Some(crate::catalog::Kind::Other) }], "a new label replaces the old one; an empty one removes it");
         save(&path, &cfg).unwrap();
         let back: HostConfig = load(&path).unwrap();
-        assert_eq!((back.auto, back.label), (cfg.auto, cfg.label));
+        assert_eq!((back.auto, back.label, back.sources), (cfg.auto, cfg.label, cfg.sources));
+        let old: HostConfig = toml::from_str("[[auto]]\nrelay = \"ab\"\ndevice = \"046d:c24f\"\n").unwrap();
+        let mut old = old;
+        assert_eq!(old.auto[0].mode, Mode::Auto, "rules from before 0.7 are in auto mode");
+        assert_eq!(old.remembered_sources(), &["punktfunk"], "and were for punktfunk streams");
+        assert!(HostConfig::default().remembered_sources().is_empty());
         assert_eq!(decode_key(&back.relay[0].key).unwrap(), [0u8; 32]);
         #[cfg(unix)]
         assert_eq!(std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&path).unwrap().permissions()) & 0o777, 0o600);
@@ -234,7 +285,7 @@ mod tests {
 
     #[test]
     fn auto_rules_per_port() {
-        let rule = |port: Option<&str>| AutoRule { relay: "r".into(), device: "045e:028e".into(), title: None, port: port.map(Into::into) };
+        let rule = |port: Option<&str>| AutoRule { relay: "r".into(), device: "045e:028e".into(), title: None, port: port.map(Into::into), mode: Mode::Auto };
         let dev = |busid: &str| crate::proto::DeviceInfo {
             busid: busid.into(),
             id: "045e:028e".into(),

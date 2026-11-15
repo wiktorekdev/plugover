@@ -86,7 +86,11 @@ pub fn print_status(st: &Status) {
         "{} {} {}",
         paint(BOLD, &st.host),
         paint(DIM, format!("· Plugover {version} ·")),
-        if st.session { paint(GOOD, "● stream running") } else { paint(DIM, "○ no stream") }
+        match (st.session, st.sessions.is_empty()) {
+            (true, false) => paint(GOOD, format!("● stream running ({})", st.sessions.join(", "))),
+            (true, true) => paint(GOOD, "● stream running"),
+            _ => paint(DIM, "○ no stream"),
+        }
     );
     if st.relays.is_empty() {
         println!("\nNo relay paired yet. Run {} here, or open Plugover in the punktfunk console.", cmd("plugover pair"));
@@ -157,10 +161,12 @@ fn print_relay(r: &RelayStatus, ours: &str) {
             DeviceState::Elsewhere => (paint(WARN, "◐"), paint(WARN, format!("in use by {}", d.info.lent_to.as_deref().unwrap_or("someone")))),
             DeviceState::Free => (paint(DIM, "○"), paint(DIM, "free")),
         };
-        let auto = match (d.auto, d.auto_port) {
-            (true, true) => paint(ACCENT, "  connects with streams, this port only"),
-            (true, false) => paint(ACCENT, "  connects with streams"),
-            _ => String::new(),
+        let auto = match (d.auto, d.always, d.auto_port) {
+            (false, ..) => String::new(),
+            (true, always, port) => paint(
+                ACCENT,
+                format!("  {}{}", if always { "always connected" } else { "connects with streams" }, if port { ", this port only" } else { "" }),
+            ),
         };
         let drops = match d.history.drops {
             0 => String::new(),
