@@ -165,9 +165,15 @@ pub fn export_status(sys: &Path, busid: &str) -> Option<u8> {
 
 /// Give the device back to its normal local driver.
 pub fn export_release(sys: &Path, busid: &str) -> io::Result<()> {
+    let dev = sys.join("bus/usb/devices").join(busid);
     let stub = sys.join("bus/usb/drivers/usbip-host");
-    if driver_name(&sys.join("bus/usb/devices").join(busid)).as_deref() == Some("usbip-host") {
+    if driver_name(&dev).as_deref() == Some("usbip-host") {
         write(&stub.join("unbind"), busid)?;
+    }
+    // A disconnected device can leave an entry in match_busid. The kernel's legacy rebind
+    // can dereference a stale USB device pointer for that entry.
+    if !dev.try_exists()? {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "USB device is no longer present"));
     }
     // While the busid is still in usbip-host's match table the generic driver will not take the
     // device, which leaves it with no driver at all. `rebind` re-probes it and removes the entry
@@ -331,6 +337,21 @@ mod tests {
         assert_eq!(d.product.as_deref(), Some("G29 Driving Force Racing Wheel"));
         assert_eq!(d.interfaces[0].class, 3);
         assert_eq!(d.interfaces[0].hid.as_deref(), Some(&[0x05, 0x01][..]));
+        fs::remove_dir_all(sys).unwrap();
+    }
+
+    #[test]
+    fn does_not_rebind_a_missing_device_from_the_usbip_match_table() {
+        let sys = std::env::temp_dir().join(format!("plugover-stale-usbip-{}", std::process::id()));
+        let stub = sys.join("bus/usb/drivers/usbip-host");
+        fs::create_dir_all(&stub).unwrap();
+        fs::write(stub.join("match_busid"), "1-9\n").unwrap();
+        fs::write(stub.join("rebind"), "").unwrap();
+
+        let claimed = export_claimed(&sys);
+        assert_eq!(claimed, ["1-9"]);
+        assert_eq!(export_release(&sys, &claimed[0]).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(fs::read(stub.join("rebind")).unwrap().is_empty());
         fs::remove_dir_all(sys).unwrap();
     }
 
