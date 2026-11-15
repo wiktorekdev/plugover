@@ -450,7 +450,23 @@ hardware and recorded in the README compatibility tables.
 - Serial-number following, relay stuck-device recovery, relay "take over" request, doctor checks
   for foreign USB forwarding.
 
-**Phase 4: Bluetooth on Linux relay and Linux host**
+**Phase 4: Bluetooth on Linux relay and Linux host** (forwarding done in the working tree)
+- Done: `src/hid.rs`. The relay lists Bluetooth HID devices from sysfs (`HID_ID` bus 0005,
+  `HID_UNIQ`, `report_descriptor`), lends one over `PLH1` (busid as an encrypted JSON line, tag over
+  the busid, then frames that map onto uhid events), reads and writes it through hidraw, and answers
+  report requests with the HIDIOC[GS]{FEATURE,INPUT,OUTPUT} ioctls. Hosts on Linux open the control
+  channel as `PLC3` to see Bluetooth devices (older relays hang up; the host falls back). The host
+  recreates the device with `UHID_CREATE2` on `BUS_BLUETOOTH`; detaching closes it. Lends share
+  the relay's exclusivity, share list, unpairing and take-over with USB devices. Host setup adds a
+  `uaccess` udev rule for /dev/uhid when needed; doctor checks it.
+- Verified on this machine with a simulated Bluetooth gamepad made with uhid (a Valve vendor id, so
+  the Steam udev rule let an unprivileged test relay open it): the host's copy appeared on bus 0005
+  with the same ids and name, input reports streamed, an output report and a feature request reached
+  the device, and detaching removed the copy. Not verified: a real controller (DualSense, DS4,
+  Switch Pro, Xbox), latency, the relay's own drivers interfering, long sessions.
+- Not done yet: pairing from the Plugover page or CLI (BlueZ over D-Bus, needs `zbus`); for now
+  pair on the relay with `bluetoothctl`. The relay keeps its own driver bound, so a relay that is
+  also a desktop sees the controller too.
 - `zbus` pairing with agent, `hidraw` tap, `PLC3` and `PLH1`, `uhid` on the host, UI and CLI
   (`plugover bt scan|pair|forget`).
 - Test devices: DualSense (rumble, triggers, motion, touchpad), DualShock 4, Switch Pro, Xbox

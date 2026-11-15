@@ -1018,7 +1018,7 @@ mod tests {
         );
         d.cfg.lock().unwrap().auto = vec![rule("046d:c24f", state::Mode::Always), rule("046d:c266", state::Mode::Auto)];
         for (port, busid) in [(1, "1-1"), (2, "1-2"), (3, "1-3")] {
-            d.attached.lock().unwrap().insert(("r".into(), busid.into()), vhci::Attachment { port });
+            d.attached.lock().unwrap().insert(("r".into(), busid.into()), vhci::Attachment { port, hid: None });
         }
         d.manual.lock().unwrap().insert(("r".into(), "1-3".into()));
 
@@ -1080,7 +1080,7 @@ mod tests {
         let relay = PairedRelay { id: "r".into(), name: "rig".into(), address: "127.0.0.1:1".into(), host_id: "00".repeat(8), key: "00".repeat(32), encrypts: true, unencrypted: false };
         d.cfg.lock().unwrap().relay.push(relay);
         let slot = ("r".to_string(), "1-2".to_string());
-        d.attached.lock().unwrap().insert(slot.clone(), vhci::Attachment { port: 3 });
+        d.attached.lock().unwrap().insert(slot.clone(), vhci::Attachment { port: 3, hid: None });
 
         // No vhci_hcd in this fake sysfs, so every detach fails.
         d.set_session("punktfunk", true, None);

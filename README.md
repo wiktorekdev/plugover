@@ -122,6 +122,17 @@ streams; otherwise it stays connected. A device's details let you:
 - keep auto-connect to one port, when two of the same model are plugged in,
 - fix a wrong name or device kind.
 
+### Bluetooth controllers
+
+Pair a Bluetooth controller or keyboard with the relay (for now with `bluetoothctl` or your
+desktop's Bluetooth settings there). While it is connected it shows up next to the USB devices,
+with a port like `bt-8c41f2974f28`, and you turn it on like any other device. Plugover does not
+forward the Bluetooth radio: the relay passes the controller's reports on, and a Linux host
+recreates the controller on its Bluetooth bus with the same ids, so its drivers and Steam treat it
+as if it were paired with the host itself, rumble, lights and motion sensors included. Windows
+hosts cannot take Bluetooth devices yet; a USB Bluetooth adapter plugged into the relay can still
+be passed through as a USB device.
+
 A device another host has shows **Take over**: the relay takes it back from that host and keeps it
 for this one. Both hosts need Plugover 0.7 or newer on the relay.
 
@@ -171,6 +182,11 @@ storage and network adapters are never shared. Set `NO_COLOR=1` to turn off colo
 | punktfunk | **Tested** |
 | Sunshine and forks on Linux | Hook built and run against a stand-in, not with a real Sunshine yet |
 | Sunshine and forks on Windows | Built, not tested yet |
+
+| Bluetooth | Status |
+|---|---|
+| Linux relay to Linux host | Tested with a simulated Bluetooth gamepad (input, output and feature reports); no real controller yet |
+| Windows relay or host | Not supported yet |
 
 | Device | USB id | Status |
 |---|---|---|

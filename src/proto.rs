@@ -21,6 +21,11 @@ pub const CONTROL_CONTEXT: &str = "control";
 /// Since 0.7; older relays hang up.
 pub const REQUEST: &[u8; 4] = b"PLR1";
 pub const REQUEST_CONTEXT: &str = "request";
+/// The control channel, encrypted, with the relay's Bluetooth devices in its snapshots. Since 0.7;
+/// older relays hang up and the host falls back to `CONTROL_ENCRYPTED`.
+pub const CONTROL_HID: &[u8; 4] = b"PLC3";
+/// Lend one Bluetooth device as HID (see `hid`). Encrypted after the challenge. Since 0.7.
+pub const HID: &[u8; 4] = b"PLH1";
 /// Sent instead of a nonce to a host the relay does not know (never paired, or unpaired since).
 /// Older hosts just fail the challenge with it.
 pub const UNPAIRED: &[u8; 32] = b"plugover: this host is unpaired.";

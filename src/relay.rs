@@ -161,8 +161,10 @@ impl Relay {
         match &magic {
             proto::DATA => self.lend(s, false),
             proto::DATA_ENCRYPTED => self.lend(s, true),
-            proto::CONTROL => self.control(s, false),
-            proto::CONTROL_ENCRYPTED => self.control(s, true),
+            proto::CONTROL => self.control(s, false, false),
+            proto::CONTROL_ENCRYPTED => self.control(s, true, false),
+            proto::CONTROL_HID => self.control(s, true, true),
+            proto::HID => self.lend_hid(s),
             proto::PAIR => self.pair(s),
             proto::REQUEST => self.request(s),
             _ => bail!("not a Plugover host"),
@@ -312,8 +314,17 @@ impl Relay {
         if st.withheld(&id).is_some() {
             bail!("{busid} ({id}) is not on the share list of {}", self.name);
         }
+        ensure!(!dev.attached, "{busid} is already in use");
+        let windows = cfg!(windows);
+        let conn = if windows { Some(s.try_clone()?) } else { None };
+        self.claim(busid, host, conn, windows)?;
+        Ok(dev)
+    }
+
+    /// Claims `busid` for `host`, unless someone has it or it was just taken over for another.
+    fn claim(&self, busid: &str, host: &PairedHost, conn: Option<TcpStream>, live: bool) -> Result<()> {
         let mut lent = self.lent.lock().unwrap();
-        ensure!(!dev.attached && !lent.contains_key(busid), "{busid} is already in use");
+        ensure!(!lent.contains_key(busid), "{busid} is already in use");
         let mut promised = self.promised.lock().unwrap();
         if let Some((id, name, at)) = promised.get(busid)
             && at.elapsed() < PROMISE
@@ -322,10 +333,51 @@ impl Relay {
             bail!("{busid} was just taken over by {name}");
         }
         promised.remove(busid);
-        let windows = cfg!(windows);
-        let conn = if windows { Some(s.try_clone()?) } else { None };
-        lent.insert(busid.into(), Lend { host_id: host.id.clone(), host: host.name.clone(), live: windows, conn, taken: false });
-        Ok(dev)
+        lent.insert(busid.into(), Lend { host_id: host.id.clone(), host: host.name.clone(), live, conn, taken: false });
+        Ok(())
+    }
+
+    /// Lends a Bluetooth device as HID, until the host lets go or the device disconnects.
+    fn lend_hid(&self, mut s: TcpStream) -> Result<()> {
+        let (host, nonce) = self.challenge(&mut s)?;
+        let mut tag = [0u8; auth::TAG_LEN];
+        s.read_exact(&mut tag)?;
+        let key = state::decode_key(&host.key)?;
+        let (r, mut w) = tls::wrap(s.try_clone()?, s.try_clone()?, &key, &nonce, true);
+        let mut r = BufReader::new(r);
+        let asked: serde_json::Value = proto::recv(&mut r)?;
+        let busid = asked["busid"].as_str().unwrap_or_default().to_string();
+        ensure!(auth::verify(&key, &nonce, &busid, &tag), "{} failed the challenge", host.name);
+        let dev = (|| {
+            let dev = crate::hid::list(&self.sys).into_iter().find(|d| d.busid == busid).with_context(|| format!("no Bluetooth device {busid} is connected"))?;
+            let id = format!("{:04x}:{:04x}", dev.info.vid, dev.info.pid);
+            ensure!(self.state()?.withheld(&id).is_none(), "{busid} ({id}) is not on the share list of {}", self.name);
+            self.claim(&busid, &host, Some(s.try_clone()?), true)?;
+            Ok(dev)
+        })();
+        let dev = match dev {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = crate::hid::refuse(&mut w, &format!("{e:#}"));
+                return Err(e);
+            }
+        };
+        net::tune(&s)?;
+        s.set_read_timeout(None)?;
+        eprintln!("lent {busid} ({}) to {}", dev.info.name, host.name);
+        // Bluetooth lends raise no USB uevent, so hosts hear about them from here.
+        self.bump();
+        #[cfg(target_os = "linux")]
+        let result = crate::hid::lend(&dev, r, w, s.try_clone()?);
+        #[cfg(not(target_os = "linux"))]
+        let result: Result<()> = {
+            let _ = (r, w);
+            Err(anyhow!("this relay cannot lend Bluetooth devices"))
+        };
+        self.lent.lock().unwrap().remove(&busid);
+        self.bump();
+        eprintln!("{busid} is back from {}", host.name);
+        result
     }
 
     /// One request from a paired host, on its own encrypted connection.
@@ -364,7 +416,8 @@ impl Relay {
         bail!("{busid} did not come back from the host that had it")
     }
 
-    fn control(&self, mut s: TcpStream, encrypted: bool) -> Result<()> {
+    /// `bluetooth`: the host can take Bluetooth devices, so its snapshots list them.
+    fn control(&self, mut s: TcpStream, encrypted: bool, bluetooth: bool) -> Result<()> {
         let (host, nonce) = self.challenge(&mut s)?;
         let mut tag = [0u8; auth::TAG_LEN];
         s.read_exact(&mut tag)?;
@@ -397,7 +450,7 @@ impl Relay {
             loop {
                 let st = self.state()?;
                 ensure!(st.hosts.iter().any(|h| h.id == host.id), "{} was unpaired", host.name);
-                let snap = self.snapshot(&st)?;
+                let snap = self.snapshot(&st, bluetooth)?;
                 if last.as_ref() != Some(&snap) || sent_at.elapsed() >= HEARTBEAT {
                     proto::send(&mut *w.lock().unwrap(), &snap)?;
                     (last, sent_at) = (Some(snap), Instant::now());
@@ -411,7 +464,7 @@ impl Relay {
         result
     }
 
-    fn snapshot(&self, st: &RelayState) -> Result<Snapshot> {
+    fn snapshot(&self, st: &RelayState, bluetooth: bool) -> Result<Snapshot> {
         let mut lent: HashMap<String, String> = self.lent.lock().unwrap().iter().map(|(b, l)| (b.clone(), l.host.clone())).collect();
         // A device taken over shows as the new host's while it waits for it, so others leave it.
         for (busid, (_, name, at)) in self.promised.lock().unwrap().iter() {
@@ -420,7 +473,7 @@ impl Relay {
             }
         }
         let mut known = self.known.lock().unwrap();
-        let devices = self
+        let mut devices: Vec<DeviceInfo> = self
             .devices()?
             .iter()
             .map(|Device { dev: d, attached, .. }| {
@@ -445,6 +498,25 @@ impl Relay {
                 }
             })
             .collect();
+        if bluetooth {
+            for d in crate::hid::list(&self.sys) {
+                let id = format!("{:04x}:{:04x}", d.info.vid, d.info.pid);
+                let name = catalog::catalog_title(&id).unwrap_or_else(|| d.info.name.clone());
+                devices.push(DeviceInfo {
+                    lent_to: lent.get(&d.busid).cloned(),
+                    identity: Identity {
+                        title: name.clone(),
+                        name,
+                        maker: String::new(),
+                        kind: catalog::hid_kind(&d.descriptor()).unwrap_or(catalog::Kind::Other),
+                        source: catalog::Source::Device,
+                        blocked: st.withheld(&id).map(str::to_string),
+                    },
+                    busid: d.busid,
+                    id,
+                });
+            }
+        }
         Ok(Snapshot { relay_id: self.id.clone(), relay: self.name.clone(), devices, version: proto::VERSION.into(), encrypted: false })
     }
 
@@ -523,6 +595,13 @@ impl Relay {
     #[cfg(target_os = "linux")]
     fn keep(&self, busid: &str, l: &Lend, revoked: bool) -> bool {
         if !l.live {
+            return true;
+        }
+        // Bluetooth lends end when `lend_hid` returns; closing the connection makes it return.
+        if crate::hid::is_bluetooth(busid) {
+            if revoked && let Some(c) = &l.conn {
+                let _ = c.shutdown(std::net::Shutdown::Both);
+            }
             return true;
         }
         match sysfs::export_status(&self.sys, busid) {
@@ -771,7 +850,8 @@ mod tests {
                 let real = real.clone();
                 thread::spawn(move || {
                     let mut magic = [0u8; 4];
-                    if c.read_exact(&mut magic).is_err() || magic[3] == b'2' {
+                    // Relays before 0.6 know only the first version of each channel.
+                    if c.read_exact(&mut magic).is_err() || magic[3] != b'1' {
                         return;
                     }
                     let mut up = TcpStream::connect(&real).unwrap();

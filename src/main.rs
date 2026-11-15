@@ -7,6 +7,7 @@ mod catalog;
 mod cli;
 mod discovery;
 mod doctor;
+mod hid;
 mod host;
 mod hostd;
 mod net;

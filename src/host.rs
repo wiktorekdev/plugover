@@ -107,6 +107,17 @@ pub fn request(relay: &PairedRelay, req: &proto::RelayRequest) -> Result<()> {
 /// Opens the control channel, encrypted unless the relay is too old to. Returns the connection,
 /// its nonce and whether it is encrypted.
 fn open_control(relay: &PairedRelay, id: &auth::HostId) -> Result<(TcpStream, [u8; 32], bool)> {
+    // Linux hosts can take Bluetooth devices (through uhid), so they ask for them too.
+    #[cfg(target_os = "linux")]
+    {
+        let mut s = connect(&relay.address)?;
+        match proto::challenge(&mut s, proto::CONTROL_HID, id) {
+            Ok(nonce) => return Ok((s, nonce, true)),
+            // Relays before 0.7 hang up; ask again the way they understand.
+            Err(e) if matches!(e.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     let mut s = connect(&relay.address)?;
     match proto::challenge(&mut s, proto::CONTROL_ENCRYPTED, id) {
         Ok(nonce) => Ok((s, nonce, true)),

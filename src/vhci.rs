@@ -8,8 +8,11 @@ use anyhow::Result;
 use std::path::Path;
 
 pub struct Attachment {
-    /// Virtual hub port, as the OS numbers it.
+    /// Virtual hub port, as the OS numbers it; 0 for a Bluetooth device.
     pub port: u32,
+    /// A Bluetooth device, recreated through uhid instead of USB/IP.
+    #[cfg(target_os = "linux")]
+    pub hid: Option<crate::hid::Link>,
     #[cfg(windows)]
     alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -35,7 +38,7 @@ mod imp {
             net::tune(&s)?;
             // The kernel keeps its own reference; dropping our handle afterwards is fine.
             let port = sysfs::vhci_attach(sys, s.as_raw_fd(), dev.devid(), dev.speed)?;
-            return Ok(Attachment { port });
+            return Ok(Attachment { port, hid: None });
         }
         // This kernel cannot encrypt, so it gets one end of a local socket and Plugover encrypts
         // between the other end and the relay.
@@ -47,7 +50,7 @@ mod imp {
         let ours = net::hand_over(|fd| sysfs::vhci_attach(sys, fd, dev.devid(), dev.speed).map(|p| port = p))?;
         // Ends when either side hangs up; the kernel then frees the port, which `alive` sees.
         thread::spawn(move || ours.pump(s, r, w));
-        Ok(Attachment { port })
+        Ok(Attachment { port, hid: None })
     }
 
     pub fn alive(sys: &Path, a: &Attachment) -> bool {
@@ -178,6 +181,33 @@ mod imp {
     }
 }
 
-pub use imp::{alive, attach, detach};
+/// Plugs the relay's device at `busid` in here: USB/IP for USB devices, uhid for Bluetooth ones.
+pub fn attach(sys: &Path, relay: &PairedRelay, busid: &str, encrypt: bool) -> Result<Attachment> {
+    if crate::hid::is_bluetooth(busid) {
+        anyhow::ensure!(encrypt, "Bluetooth devices connect only encrypted");
+        #[cfg(target_os = "linux")]
+        return Ok(Attachment { port: 0, hid: Some(crate::hid::attach(relay, busid)?) });
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("Bluetooth devices from a relay reach Linux hosts only, so far");
+    }
+    imp::attach(sys, relay, busid, encrypt)
+}
+
+pub fn alive(sys: &Path, a: &Attachment) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Some(h) = &a.hid {
+        return h.alive();
+    }
+    imp::alive(sys, a)
+}
+
+pub fn detach(sys: &Path, a: &Attachment) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(h) = &a.hid {
+        h.close();
+        return Ok(());
+    }
+    imp::detach(sys, a)
+}
 #[cfg(windows)]
 pub use imp::usbip_exe;

@@ -15,6 +15,8 @@ const RELAY_STATE: &str = "/var/lib/plugover";
 const FIREWALL_RECORD: &str = "/var/lib/plugover/firewall";
 /// Before 0.5.1 both roles' modules shared this file, so removing one role dropped the other's.
 const OLD_MODULES: &str = "/etc/modules-load.d/plugover.conf";
+/// Lets the logged-in user recreate a relay's Bluetooth devices through /dev/uhid.
+const UHID_RULE: &str = "/etc/udev/rules.d/70-plugover-uhid.rules";
 const NFT_CONF: &str = "/etc/nftables.conf";
 const VHCI: &str = "/sys/devices/platform/vhci_hcd.0";
 const PORT: u16 = crate::proto::DEFAULT_PORT;
@@ -511,9 +513,25 @@ fn plan_host(found: &Found) -> Result<Plan> {
         lines.push(line(Mark::Warn, "You may not plug devices in", format!("{VHCI}/attach is not writable for you")));
     }
 
+    // Bluetooth devices from a relay are recreated through uhid.
+    let uhid = fs::OpenOptions::new().write(true).open("/dev/uhid").is_ok();
+    if !uhid {
+        lines.push(line(Mark::Todo, "Let you use Bluetooth devices from a relay", format!("a udev rule, {UHID_RULE}")));
+    }
+
     let mut steps: Vec<(String, Action)> = Vec::new();
     if !loaded {
         steps.push(("Loading kernel modules".into(), Box::new(|| load_module("vhci-hcd"))));
+    }
+    if !uhid {
+        steps.push((
+            "Adding the udev rule for Bluetooth devices".into(),
+            Box::new(|| {
+                root("modprobe", &["uhid"])?;
+                root_write(UHID_RULE, "# Plugover: the logged-in user may recreate a relay's Bluetooth devices.\nKERNEL==\"uhid\", TAG+=\"uaccess\"\n")?;
+                root("udevadm", &["trigger", "--name-match=uhid"]).map(drop)
+            }),
+        ));
     }
     if join_group {
         let user = probe("id", &["-un"]).unwrap_or_default();
@@ -543,7 +561,7 @@ fn plan_host(found: &Found) -> Result<Plan> {
         next_steps_host();
         Ok(())
     });
-    Ok(Plan { lines, root: !loaded || join_group, steps, after })
+    Ok(Plan { lines, root: !loaded || join_group || !uhid, steps, after })
 }
 
 fn start_host() -> Result<()> {
@@ -599,7 +617,7 @@ fn plan_uninstall(found: &Found, ctx: &Ctx) -> Result<Plan> {
         println!("  {} {}", paint(GOOD.bold(), done), paint(DIM, "The usbip kernel modules stay; they come with your kernel."));
         Ok(())
     });
-    Ok(Plan { lines, steps, root: relay, after })
+    Ok(Plan { lines, steps, root: relay || (host && Path::new(UHID_RULE).exists()), after })
 }
 
 fn remove_relay(purge: bool) -> Result<()> {
@@ -626,6 +644,9 @@ fn remove_relay(purge: bool) -> Result<()> {
 
 fn remove_host(purge: bool) -> Result<()> {
     super::unhook_streaming_hosts();
+    if Path::new(UHID_RULE).exists() {
+        root("rm", &["-f", UHID_RULE])?;
+    }
     let bin = unit_bin(&host_unit());
     let _ = exec(Command::new("systemctl").args(["--user", "disable", "--now", "plugover-host"]));
     let _ = fs::remove_file(host_unit());

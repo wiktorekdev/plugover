@@ -119,6 +119,11 @@ fn check_host(endpoint: &Path) -> bool {
             }
         }
         kernel_tls();
+        if std::fs::OpenOptions::new().write(true).open("/dev/uhid").is_ok() {
+            ok("Bluetooth devices", "can be recreated here (/dev/uhid)");
+        } else {
+            warn("Bluetooth devices", "a relay's Bluetooth devices cannot connect: /dev/uhid is not writable for you", Some(&format!("{} adds a udev rule", cmd("plugover setup --host"))));
+        }
         if crate::sysfs::vhci_writable(sys) {
             ok("Plugging devices in", "allowed for this user");
         } else {
