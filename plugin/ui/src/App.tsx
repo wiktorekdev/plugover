@@ -8,7 +8,7 @@ import { Switch } from "@unom/ui/form/switch";
 import { cn } from "@unom/ui/lib/utils";
 import { Spinner } from "@unom/ui/spinner";
 import { Toaster, toast } from "@unom/ui/toast";
-import { ChevronDown, ChevronLeft, Ellipsis, Monitor, Pause, Play, Plus, Unplug } from "lucide-react";
+import { Bluetooth, ChevronDown, ChevronLeft, Ellipsis, Monitor, Pause, Play, Plus, RotateCw, Unplug, X } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import {
 	ApiError,
@@ -836,9 +836,13 @@ function ForgetButton({ relay, refresh }: { relay: Relay; refresh: () => Promise
 	);
 }
 
+/** BlueZ's icon names for the input devices it lists. */
+const BT_ICON: Record<string, Kind> = { "input-gaming": "gamepad", "input-keyboard": "keyboard", "input-mouse": "mouse" };
+
 /** Pairs Bluetooth controllers and keyboards with the relay; once connected they show up as its devices. */
 function BluetoothPairing({ relay, onClose, refresh }: { relay: Relay; onClose: () => void; refresh: () => Promise<void> }) {
 	const [nearby, setNearby] = useState<Nearby[]>();
+	/** "scan", or the address being paired or forgotten. */
 	const [busy, setBusy] = useState<string>();
 	const run = async (op: string, body: object, what: string, done?: string) => {
 		setBusy(what);
@@ -855,51 +859,85 @@ function BluetoothPairing({ relay, onClose, refresh }: { relay: Relay; onClose: 
 	const scan = () => run("bt_scan", { seconds: 8 }, "scan");
 	// biome-ignore lint/correctness/useExhaustiveDependencies: once, when it opens
 	useEffect(() => void scan(), []);
+	const scanning = busy === "scan";
 	return (
-		<Card className="flex flex-col gap-3">
-			<div className="flex items-start justify-between gap-4">
-				<div>
-					<p className="font-medium">Bluetooth devices on {relay.name}</p>
-					<p className="mt-1 text-sm text-muted-foreground">
-						Put the controller in pairing mode first: hold Share and PS on a DualShock 4 or DualSense, the pair button on an Xbox
-						controller, or Sync on a Switch controller, until its light flashes quickly.
+		<Card padding={false}>
+			<div className="flex items-center gap-4 border-b border-border p-4">
+				<div className="grid size-11 shrink-0 place-items-center rounded-xl bg-neutral-accent text-primary">
+					<Bluetooth className="size-6" />
+				</div>
+				<div className="min-w-0 flex-1">
+					<p className="font-medium">Bluetooth</p>
+					<p className="mt-0.5 text-sm text-muted-foreground">
+						{scanning ? "Looking for devices in pairing mode…" : `Controllers and keyboards paired with ${relay.name}`}
 					</p>
 				</div>
-				<Button size="sm" variant="ghost" onClick={onClose}>
-					Close
+				<Button size="icon" variant="ghost" aria-label="Look again" disabled={!!busy} onClick={scan}>
+					<RotateCw className={cn("size-4", scanning && "animate-spin")} />
+				</Button>
+				<Button size="icon" variant="ghost" aria-label="Close Bluetooth" onClick={onClose}>
+					<X className="size-4" />
 				</Button>
 			</div>
 			{nearby?.map((d) => (
-				<div key={d.address} className="flex items-center gap-3">
-					<div className="min-w-0 flex-1">
-						<p className="[overflow-wrap:anywhere]">{d.name || d.address}</p>
-						<p className="text-sm text-muted-foreground">
-							{d.address} · {d.connected ? "Connected" : d.paired ? "Paired, turn it on to connect" : "Ready to pair"}
-						</p>
-					</div>
-					{d.paired ? (
-						<Button size="sm" variant="ghost" disabled={!!busy} onClick={() => run("bt_forget", { address: d.address }, d.address, `Forgot ${d.name}`)}>
-							{busy === d.address ? <Spinner /> : "Forget"}
-						</Button>
-					) : (
-						<Button size="sm" disabled={!!busy} onClick={() => run("bt_pair", { address: d.address }, d.address, `Paired ${d.name}`)}>
-							{busy === d.address ? <Spinner /> : "Pair"}
-						</Button>
-					)}
-				</div>
+				<BluetoothRow key={d.address} device={d} busy={busy} run={run} />
 			))}
-			{nearby?.length === 0 && <p className="text-sm text-muted-foreground">No Bluetooth input devices found.</p>}
-			<div>
-				<Button size="sm" variant="outline" disabled={!!busy} onClick={scan}>
-					{busy === "scan" ? (
-						<>
-							<Spinner /> Looking for devices
-						</>
-					) : (
-						"Look again"
-					)}
-				</Button>
-			</div>
+			{nearby?.length === 0 && !scanning && <p className="border-b border-border p-4 text-sm text-muted-foreground">Nothing found nearby.</p>}
+			<p className="p-4 text-sm text-muted-foreground">
+				Not listed? Put it in pairing mode until its light flashes quickly: Share and PS on a PlayStation controller, the pair
+				button on an Xbox controller, Sync on a Switch controller. Then look again.
+			</p>
 		</Card>
+	);
+}
+
+function BluetoothRow({
+	device: d,
+	busy,
+	run,
+}: { device: Nearby; busy?: string; run: (op: string, body: object, what: string, done?: string) => Promise<void> }) {
+	const [confirming, setConfirming] = useState(false);
+	const Icon = KIND_ICON[BT_ICON[d.icon] ?? "gamepad"];
+	const mine = busy === d.address;
+	const name = d.name || d.address;
+	return (
+		<div className="flex flex-wrap items-center gap-4 border-b border-border p-4">
+			<div className={cn("grid size-11 shrink-0 place-items-center rounded-xl bg-neutral-accent text-primary", !d.connected && "opacity-60")}>
+				<Icon className="size-6" />
+			</div>
+			<div className="min-w-0 flex-1">
+				<p className="font-medium [overflow-wrap:anywhere]">{name}</p>
+				<div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+					<span className="[overflow-wrap:anywhere]">
+						{d.address}
+						{mine ? (d.paired ? " · Forgetting…" : " · Pairing…") : !d.connected && (d.paired ? " · Turn it on to connect" : " · Ready to pair")}
+					</span>
+					{d.connected && <Badge size="sm">Connected</Badge>}
+				</div>
+			</div>
+			{!d.paired ? (
+				<Button size="sm" disabled={!!busy} onClick={() => run("bt_pair", { address: d.address }, d.address, `${name} is paired`)}>
+					{mine ? <Spinner /> : "Pair"}
+				</Button>
+			) : confirming ? (
+				<span role="alert" className="flex items-center gap-2 text-sm">
+					<Button
+						size="sm"
+						variant="destructive"
+						disabled={!!busy}
+						onClick={() => run("bt_forget", { address: d.address }, d.address, `${name} is forgotten`).then(() => setConfirming(false))}
+					>
+						{mine ? <Spinner /> : "Forget"}
+					</Button>
+					<Button size="sm" variant="ghost" disabled={mine} onClick={() => setConfirming(false)}>
+						Cancel
+					</Button>
+				</span>
+			) : (
+				<Button size="sm" variant="ghost" disabled={!!busy} onClick={() => setConfirming(true)}>
+					Forget
+				</Button>
+			)}
+		</div>
 	);
 }
