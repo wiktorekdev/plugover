@@ -432,6 +432,12 @@ hardware and recorded in the README compatibility tables.
 - Verified: unit tests for config merging; the real hook commands against a test daemon with a
   stand-in listener (start, stop, staying watched for 70 s, crash ending the stream within 17 s,
   exit 0 with the daemon down). Not verified: any real Sunshine-family app, Windows, the Flatpak.
+- Tried 2026-11-15 with Sunshine's Flatpak (2026.914) and Moonlight 6.2 on KDE Plasma Wayland with
+  NVIDIA: Moonlight paired and Sunshine found the hook (doctor too), and the hook's command, run with
+  `flatpak-spawn --host` from inside the Sunshine sandbox, started and ended a session. A real
+  launch never reached the prep commands: Sunshine probes encoders first, and its second XDG portal
+  session (`RemoteDesktop CreateSession`) got no answer, so the launch hung. KMS capture is not
+  available to the Flatpak. Next try: a native Sunshine with KMS capture.
 - Not covered: Moonshine and Wolf (no prep commands), Rubylight (Rust rewrite; its API not read).
 
 **Phase 3: reliability** (take-over done in the working tree, not released)
