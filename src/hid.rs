@@ -191,7 +191,7 @@ mod linux {
     /// Runs `nr` on `buf`; the bytes it filled, or the errno.
     fn hidraw_ioctl(f: &File, nr: u8, buf: &mut [u8]) -> std::result::Result<usize, u16> {
         // SAFETY: the ioctl reads and writes at most `buf.len()` bytes, which the request encodes.
-        let n = unsafe { libc::ioctl(f.as_raw_fd(), ioc(nr, buf.len()), buf.as_mut_ptr()) };
+        let n = unsafe { libc::ioctl(f.as_raw_fd(), ioc(nr, buf.len()) as libc::Ioctl, buf.as_mut_ptr()) };
         if n < 0 { Err(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO) as u16) } else { Ok(n as usize) }
     }
 
@@ -208,7 +208,7 @@ mod linux {
             .filter_map(|e| {
                 let f = File::open(Path::new("/dev/input").join(e.file_name())).ok()?;
                 // SAFETY: EVIOCGRAB takes an int by value.
-                (unsafe { libc::ioctl(f.as_raw_fd(), EVIOCGRAB, 1 as libc::c_int) } == 0).then_some(f)
+                (unsafe { libc::ioctl(f.as_raw_fd(), EVIOCGRAB as libc::Ioctl, 1 as libc::c_int) } == 0).then_some(f)
             })
             .collect()
     }
