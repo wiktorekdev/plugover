@@ -107,19 +107,19 @@ the devices plugged into it. Without punktfunk, `plugover ui` opens the same pag
 |---|---|
 | punktfunk | its console plugin, which setup adds |
 | Sunshine and its forks (Apollo, Vibeshine, Vibepollo, Foundation Sunshine, LuminalShine, Polaris, Hermes, SolarFlare) | a prep command in the app's config, which host setup adds (run it again after installing the app, then restart the app). It runs before the game starts, so devices are there when the game looks for them. Apps with "exclude global prep commands" set skip it. |
-| Wolf (Linux) | its API socket, `/var/run/wolf/wolf.sock`, which belongs to root: give your user access to it. Plugover plugs devices into the host, not into Wolf's app containers; passing them on to a container is up to your Wolf config. Experimental. |
 | Parsec (Windows) | its log, `log.txt`: a stream runs while a client is connected and Parsec runs. Experimental. |
 | Steam Remote Play | its log, `logs/streaming_log.txt`: from "Streaming started to" until the stream's end line, or until Steam quits. Experimental. |
 | anything else | devices stay connected, or call `plugover session start` and `stop` from the app's own hooks |
 
-Plugover follows Wolf, Parsec and Steam once they are installed; nothing needs setting up. Having
+Plugover follows Parsec and Steam once they are installed; nothing needs setting up. Having
 them installed does not change when devices connect: only after one of them has streamed here does
 **automatically** mean "during streams".
 
 Setup finds Sunshine-family configs in `~/.config/<app>/` on Linux (and the Flatpak's) and in
 `Program Files\<app>\config\sunshine.conf` on Windows; `plugover doctor` says which ones it
-follows. Only the Linux Sunshine hook has been run so far, against a stand-in for Sunshine; see
-[Compatibility](#compatibility).
+follows. Only Sunshine on Linux has been tested; see [Compatibility](#compatibility). Sunshine's
+Flatpak hung in its screen capture on KDE with an NVIDIA card before it ran any prep command, so use
+the native package there.
 
 Turn a device on and it connects when you play. By default that is automatic: while something on
 the host reports streams (the punktfunk plugin, or `plugover session`), it connects only during
@@ -134,13 +134,14 @@ streams; otherwise it stays connected. A device's details let you:
 Pair a Bluetooth controller or keyboard with the relay: on the Plugover page, **Bluetooth
 devices** in a relay's menu looks for devices in pairing mode and pairs them; on the relay itself,
 `plugover bluetooth scan`, `plugover bluetooth pair <address>` and `plugover bluetooth forget
-<address>` do the same (as do `bluetoothctl` and your desktop's Bluetooth settings). Devices that
-want a code to be typed, like some keyboards, cannot pair from Plugover yet. While it is connected
-it shows up next to the USB devices,
-with a port like `bt-8c41f2974f28`, and you turn it on like any other device. Plugover does not
+<address>` do the same (as do `bluetoothctl` and your desktop's Bluetooth settings). Controllers
+and most keyboards pair without a code; an old keyboard that asks for one gets 0000, so type 0000
+and Enter on it while it pairs. While it is connected it shows up next to the USB devices, with a port like `bt-8c41f2974f28`, and you turn it on like any other device. Plugover does not
 forward the Bluetooth radio: the relay passes the controller's reports on, and a Linux host
 recreates the controller on its Bluetooth bus with the same ids, so its drivers and Steam treat it
-as if it were paired with the host itself, rumble, lights and motion sensors included.
+as if it were paired with the host itself, rumble, lights and motion sensors included. While a
+host has it, the relay's own desktop and games ignore it; programs on the relay that read the
+controller directly, like Steam, can still see it.
 
 This works between a Linux relay and a Linux host only, and is experimental. Windows hosts and
 relays will not get it: Windows cannot recreate a Bluetooth device the way Linux does. For a
@@ -163,6 +164,7 @@ plugover auto 046d:c24f on --port 1-2    # only the one plugged into this port
 plugover auto 046d:c24f on --mode always # stay connected, stream or not (also: auto, session)
 plugover ui                              # open the Plugover page in a browser
 plugover session start --source myapp    # tell Plugover a stream started (stop when it ends)
+                                         # (on Windows, ui and session need an administrator terminal)
 plugover attach 1-2                      # connect a device now (plugover detach 1-2 to give it back)
 plugover attach 1-2 --take               # take it over from another host that has it
 plugover label 0fd9:0080 --name "Stream Deck" --kind other   # fix a name or kind
@@ -198,7 +200,6 @@ storage and network adapters are never shared. Set `NO_COLOR=1` to turn off colo
 | Sunshine on Linux | **Tested** with a native Sunshine and Moonlight: start, stop, and a Sunshine crash mid-stream. Sunshine's Flatpak hung in its screen capture on KDE with NVIDIA before running any prep command; use the native package there |
 | Sunshine's forks on Linux | Same hook, not tested yet |
 | Sunshine and forks on Windows | Built, not tested yet |
-| Wolf | Built and tested against a stand-in socket, not with a real Wolf yet |
 | Parsec | Built and tested against logged lines from others; not with a real Parsec yet |
 | Steam Remote Play | Followed through a log written by hand on Linux; the end lines come from another project, not from a real stream yet |
 

@@ -513,7 +513,7 @@ impl Daemon {
 
     /// Checks the host apps of hooked sources: one that answers keeps its source watching; one that
     /// stopped answering mid-stream (it crashed, so its hook never said stop) ends its stream. Also
-    /// follows the apps Plugover watches without a hook (Wolf, Parsec, Steam Remote Play).
+    /// follows the apps Plugover watches without a hook (Parsec, Steam Remote Play).
     fn probe_hosts(&self) {
         let mut misses: HashMap<String, u32> = HashMap::new();
         let mut apps = crate::follow::find();
@@ -818,7 +818,7 @@ impl Daemon {
                 }
             })
             .collect();
-        api::Status { host: self.name.clone(), version: proto::VERSION.into(), session: self.session.load(Ordering::SeqCst), sessions, watching, relays }
+        api::Status { host: self.name.clone(), version: proto::VERSION.into(), session: self.session.load(Ordering::SeqCst), sessions, watching, bluetooth: cfg!(target_os = "linux"), relays }
     }
 
     fn answer<S: Read + Write>(me: &Arc<Self>, read: S, mut write: S, token: Option<&str>) {

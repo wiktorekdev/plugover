@@ -29,6 +29,9 @@ pub struct Host {
 
 impl Host {
     pub fn title(&self) -> String {
+        if self.flatpak {
+            return "Sunshine (Flatpak)".into();
+        }
         let mut c = self.name.chars();
         c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
     }
@@ -58,8 +61,11 @@ pub fn find() -> Vec<Host> {
                 hosts.push(Host { name: name.into(), config, flatpak: false });
             }
         }
-        let flatpak = crate::home().join(".var/app/dev.lizardbyte.app.Sunshine/config/sunshine/sunshine.conf");
-        if flatpak.is_file() {
+        // Its config stays behind when the Flatpak is uninstalled, so it counts only while installed.
+        const APP: &str = "dev.lizardbyte.app.Sunshine";
+        let flatpak = crate::home().join(".var/app").join(APP).join("config/sunshine/sunshine.conf");
+        let installed = [crate::home().join(".local/share/flatpak/app"), PathBuf::from("/var/lib/flatpak/app")].iter().any(|d| d.join(APP).is_dir());
+        if installed && flatpak.is_file() {
             hosts.push(Host { name: "sunshine-flatpak".into(), config: flatpak, flatpak: true });
         }
     }

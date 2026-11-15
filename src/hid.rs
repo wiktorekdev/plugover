@@ -52,6 +52,8 @@ pub struct Info {
 pub struct Paired {
     pub busid: String,
     pub hidraw: PathBuf,
+    /// Its HID device in sysfs, whose input nodes the relay holds while it lends the device.
+    pub sysfs: PathBuf,
     pub info: Info,
 }
 
@@ -88,6 +90,7 @@ pub fn list(sys: &Path) -> Vec<Paired> {
         found.push(Paired {
             busid,
             hidraw: Path::new("/dev").join(&node),
+            sysfs: dev.clone(),
             info: Info {
                 name: field("HID_NAME=").unwrap_or_default(),
                 uniq,
@@ -192,6 +195,24 @@ mod linux {
         if n < 0 { Err(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO) as u16) } else { Ok(n as usize) }
     }
 
+    /// Takes the device's input nodes (buttons, motion sensors, touchpad) for this process alone,
+    /// until the files close, so the relay's desktop and games ignore it. Programs that read
+    /// hidraw itself, like Steam, still see it.
+    fn grab(sysfs: &Path) -> Vec<File> {
+        // _IOW('E', 0x90, int)
+        const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
+        let inputs = fs::read_dir(sysfs.join("input")).into_iter().flatten().flatten();
+        let events = inputs.flat_map(|i| fs::read_dir(i.path()).into_iter().flatten().flatten());
+        events
+            .filter(|e| e.file_name().to_string_lossy().starts_with("event"))
+            .filter_map(|e| {
+                let f = File::open(Path::new("/dev/input").join(e.file_name())).ok()?;
+                // SAFETY: EVIOCGRAB takes an int by value.
+                (unsafe { libc::ioctl(f.as_raw_fd(), EVIOCGRAB, 1 as libc::c_int) } == 0).then_some(f)
+            })
+            .collect()
+    }
+
     /// Relay side: serves the device to the host over `r`/`w` until either side lets go.
     /// `stop` is the host's connection, shut when the device goes away.
     pub fn lend(dev: &Paired, r: impl Read, mut w: impl Write + Send + 'static, stop: TcpStream) -> Result<()> {
@@ -203,6 +224,8 @@ mod linux {
                 bail!(why);
             }
         };
+        // While lent, the relay's own desktop must not act on the device too.
+        let _held = grab(&dev.sysfs);
         let w = Arc::new(Mutex::new(w));
         send(&mut *w.lock().unwrap(), CREATE, &serde_json::to_vec(&dev.info)?)?;
         let numbered = numbered(&dev.descriptor());

@@ -19,6 +19,9 @@ pub struct Status {
     /// Something here reports streams, so devices in auto mode connect only during them.
     #[serde(default)]
     pub watching: bool,
+    /// This host can take a relay's Bluetooth devices (Linux hosts, through uhid).
+    #[serde(default)]
+    pub bluetooth: bool,
     pub relays: Vec<RelayStatus>,
 }
 

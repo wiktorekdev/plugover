@@ -1,6 +1,6 @@
-//! Streaming apps Plugover follows by watching them rather than through a hook: Wolf through its
-//! API socket, Parsec and Steam Remote Play through their logs. The host daemon polls each one now
-//! and then; `poll` says whether a stream runs.
+//! Streaming apps Plugover follows by reading their logs rather than through a hook: Parsec and
+//! Steam Remote Play. The host daemon polls each one now and then; `poll` says whether a stream
+//! runs.
 
 use std::{
     fs,
@@ -10,7 +10,6 @@ use std::{
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Kind {
-    Wolf,
     Parsec,
     Steam,
 }
@@ -18,7 +17,7 @@ enum Kind {
 /// One followed app.
 pub struct App {
     kind: Kind,
-    /// The Wolf socket, or the log.
+    /// The log.
     pub path: PathBuf,
     /// How far the log is read.
     offset: u64,
@@ -30,7 +29,6 @@ impl App {
     /// The source name its leases use.
     pub fn source(&self) -> &'static str {
         match self.kind {
-            Kind::Wolf => "wolf",
             Kind::Parsec => "parsec",
             Kind::Steam => "steam",
         }
@@ -38,25 +36,19 @@ impl App {
 
     pub fn title(&self) -> &'static str {
         match self.kind {
-            Kind::Wolf => "Wolf",
             Kind::Parsec => "Parsec",
             Kind::Steam => "Steam Remote Play",
         }
     }
 
-    /// Whether a stream runs now; `None` when the app cannot be asked (not running, no log).
+    /// Whether a stream runs now; `None` when the log cannot be read.
     pub fn poll(&mut self) -> Option<bool> {
-        match self.kind {
-            Kind::Wolf => wolf_sessions(&self.path).ok().map(|n| n > 0),
-            Kind::Parsec | Kind::Steam => {
-                self.read().ok()?;
-                // A crash writes no end line, so a stream also ends with the app.
-                if !self.clients.is_empty() && !running(if self.kind == Kind::Parsec { "parsecd" } else { "steam" }) {
-                    self.clients.clear();
-                }
-                Some(!self.clients.is_empty())
-            }
+        self.read().ok()?;
+        // A crash writes no end line, so a stream also ends with the app.
+        if !self.clients.is_empty() && !running(if self.kind == Kind::Parsec { "parsecd" } else { "steam" }) {
+            self.clients.clear();
         }
+        Some(!self.clients.is_empty())
     }
 
     /// Reads what the log gained since the last poll. A log that shrank was started anew.
@@ -103,7 +95,6 @@ impl App {
                     self.clients.clear();
                 }
             }
-            Kind::Wolf => {}
         }
     }
 }
@@ -114,11 +105,6 @@ pub fn find() -> Vec<App> {
     let mut apps = Vec::new();
     #[cfg(target_os = "linux")]
     {
-        // Wolf's documented socket; it runs in Docker, so the socket is there whether or not it runs.
-        let wolf = PathBuf::from("/var/run/wolf/wolf.sock");
-        if wolf.exists() {
-            apps.push(app(Kind::Wolf, wolf));
-        }
         let home = crate::home();
         for steam in [".local/share/Steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"] {
             let log = home.join(steam).join("logs/streaming_log.txt");
@@ -145,52 +131,6 @@ pub fn find() -> Vec<App> {
         }
     }
     apps
-}
-
-/// How many streams Wolf runs, from `GET /api/v1/sessions` on its socket.
-#[cfg(unix)]
-pub fn wolf_sessions(socket: &std::path::Path) -> anyhow::Result<usize> {
-    use std::{io::Write, time::Duration};
-    let mut s = std::os::unix::net::UnixStream::connect(socket)?;
-    s.set_read_timeout(Some(Duration::from_secs(2)))?;
-    s.write_all(b"GET /api/v1/sessions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
-    let mut reply = Vec::new();
-    // Wolf may keep the connection open; the body ends where Content-Length says.
-    let mut buf = [0u8; 8192];
-    loop {
-        let n = match s.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if !reply.is_empty() && matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
-            Err(e) => return Err(e.into()),
-        };
-        reply.extend_from_slice(&buf[..n]);
-        if let Some(body) = body(&reply) {
-            return parse_sessions(body);
-        }
-    }
-    let at = reply.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| anyhow::anyhow!("Wolf sent no reply"))?;
-    parse_sessions(&reply[at + 4..])
-}
-
-#[cfg(not(unix))]
-pub fn wolf_sessions(_: &std::path::Path) -> anyhow::Result<usize> {
-    anyhow::bail!("Wolf runs on Linux only")
-}
-
-/// The body once all of it arrived, by Content-Length.
-#[cfg_attr(not(unix), allow(dead_code))]
-fn body(reply: &[u8]) -> Option<&[u8]> {
-    let at = reply.windows(4).position(|w| w == b"\r\n\r\n")?;
-    let head = String::from_utf8_lossy(&reply[..at]).to_ascii_lowercase();
-    let len: usize = head.lines().find_map(|l| l.strip_prefix("content-length:"))?.trim().parse().ok()?;
-    reply.get(at + 4..at + 4 + len)
-}
-
-#[cfg_attr(not(unix), allow(dead_code))]
-fn parse_sessions(body: &[u8]) -> anyhow::Result<usize> {
-    let v: serde_json::Value = serde_json::from_slice(body)?;
-    Ok(v.get("sessions").and_then(|s| s.as_array()).map(Vec::len).unwrap_or(0))
 }
 
 /// Whether a process by this name runs.
@@ -269,33 +209,5 @@ mod tests {
         a.read().unwrap();
         assert!(a.clients.is_empty(), "a new, shorter log starts over");
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wolf_is_asked_on_its_socket() {
-        let sock = std::env::temp_dir().join(format!("plugover-wolf-{}.sock", std::process::id()));
-        let _ = fs::remove_file(&sock);
-        let l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
-        std::thread::spawn(move || {
-            let (mut c, _) = l.accept().unwrap();
-            let mut req = [0u8; 512];
-            let n = c.read(&mut req).unwrap();
-            assert!(req[..n].starts_with(b"GET /api/v1/sessions "));
-            let json = r#"{"success":true,"sessions":[{"app_id":"1"},{"app_id":"2"}]}"#;
-            // Wolf keeps the connection open after the reply.
-            c.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{json}", json.len()).as_bytes()).unwrap();
-            std::thread::sleep(std::time::Duration::from_secs(3));
-        });
-        assert_eq!(wolf_sessions(&sock).unwrap(), 2);
-        let _ = fs::remove_file(&sock);
-    }
-
-    #[test]
-    fn wolf_replies_are_read_by_length() {
-        let json = r#"{"success":true,"sessions":[{"app_id":"1"}]}"#;
-        let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}", json.len()).into_bytes();
-        assert_eq!(parse_sessions(body(&reply).unwrap()).unwrap(), 1);
-        assert!(body(&reply[..reply.len() - 1]).is_none(), "not all of it yet");
-        assert_eq!(parse_sessions(br#"{"success":true,"sessions":[]}"#).unwrap(), 0);
     }
 }

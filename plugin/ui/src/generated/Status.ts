@@ -17,4 +17,8 @@ sessions: Array<string>,
 /**
  * Something here reports streams, so devices in auto mode connect only during them.
  */
-watching: boolean, relays: Array<RelayStatus>, };
+watching: boolean, 
+/**
+ * This host can take a relay's Bluetooth devices (Linux hosts, through uhid).
+ */
+bluetooth: boolean, relays: Array<RelayStatus>, };

@@ -177,15 +177,9 @@ fn check_host(endpoint: &Path) -> bool {
     }
     for mut app in crate::follow::find() {
         let what = format!("{} streams", app.title());
-        match (app.source(), app.poll()) {
-            ("wolf", None) => warn(
-                &what,
-                format!("not followed: cannot ask Wolf at {}: {:#}", app.path.display(), crate::follow::wolf_sessions(&app.path).unwrap_err()),
-                Some("the socket belongs to root; give your user read and write access to it, after each Wolf start"),
-            ),
-            ("wolf", Some(_)) => ok(&what, format!("followed, through its API ({})", app.path.display())),
-            (_, None) => warn(&what, format!("not followed: cannot read {}", app.path.display()), None),
-            (_, Some(_)) => ok(&what, format!("followed, through its log ({}); experimental", app.path.display())),
+        match app.poll() {
+            None => warn(&what, format!("not followed: cannot read {}", app.path.display()), None),
+            Some(_) => ok(&what, format!("followed, through its log ({}); experimental", app.path.display())),
         }
     }
     if status.relays.is_empty() {

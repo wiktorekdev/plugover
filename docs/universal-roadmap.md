@@ -495,10 +495,8 @@ hardware and recorded in the README compatibility tables.
   Linux Bluetooth stays, experimental, and goes too if real controllers show it is not worth it.
 
 **Phase 6: dedicated adapters** (sessions done in the working tree, not released)
-- Done: `src/follow.rs`, polled by the host daemon every 5 s next to the hooked apps' ports. Wolf:
-  `GET /api/v1/sessions` on `/var/run/wolf/wolf.sock` (from Wolf's `unix_socket_server.cpp`,
-  read 2026-11-15); a stream runs while it lists a session. Polling rather than `/api/v1/events`,
-  which replays nothing and has had bugs with slow subscribers. Parsec (Windows): `log.txt` in
+- Done: `src/follow.rs`, polled by the host daemon every 5 s next to the hooked apps' ports. Parsec
+  (Windows): `log.txt` in
   ProgramData or any user's AppData (the daemon runs as SYSTEM), counting `name#id connected.` and
   `disconnected.`, cleared by `===== Parsec: Started =====` and when `parsecd.exe` no longer runs.
   Steam Remote Play: `streaming_log.txt`, started by `Streaming started to`, ended by `PipeWire:
@@ -507,12 +505,14 @@ hardware and recorded in the README compatibility tables.
 - Unlike the plan above, they are on without being chosen, but being installed does not make a host
   "watching": only a stream seen here does, after which the app keeps it watching while it can be
   asked. Steam is on almost every gaming PC, so mere presence would change what auto means.
-- Verified: unit tests with real log lines from others and a stand-in Wolf socket; the daemon
+- Verified: unit tests with real log lines from others; the daemon
   followed a hand-written Steam log (start and end) on this machine; doctor lists what it follows.
-  Not verified: a real Wolf, Parsec or Steam Remote Play stream. The Linux PipeWire sink
+  Not verified: a real Parsec or Steam Remote Play stream. The Linux PipeWire sink
   (`steam-streaming-playback`) would be a firmer Steam signal if the end line proves unreliable.
-- Not done: placing devices in Wolf's app containers. Plugover attaches them on the host; a Wolf
-  app sees them only if its container is given the device nodes.
+- Wolf dropped (2026-11-15): it runs games in Docker containers, mostly on headless multi-user
+  servers. Following its sessions worked only with a root-owned socket opened up after every Wolf
+  start, and devices plugged into the host still would not reach its containers, so it gave its
+  users nothing. Its forwarding also needs container placement, which is a project of its own.
 
 ## 6. Verification policy
 

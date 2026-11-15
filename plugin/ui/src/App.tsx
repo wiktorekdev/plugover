@@ -106,7 +106,7 @@ export function App() {
 			<>
 				<StreamBanner status={status} />
 				{status.relays.map((r) => (
-					<RelayView key={r.id} relay={r} hostVersion={status.version} session={status.session} watching={status.watching} refresh={refresh} />
+					<RelayView key={r.id} relay={r} hostVersion={status.version} session={status.session} watching={status.watching} bluetooth={status.bluetooth} refresh={refresh} />
 				))}
 				{/* Close under the last relay rather than a whole section gap away. */}
 				<div className="-mt-7">
@@ -342,8 +342,9 @@ function RelayView({
 	hostVersion,
 	session,
 	watching,
+	bluetooth,
 	refresh,
-}: { relay: Relay; hostVersion?: string; session: boolean; watching: boolean; refresh: () => Promise<void> }) {
+}: { relay: Relay; hostVersion?: string; session: boolean; watching: boolean; bluetooth: boolean; refresh: () => Promise<void> }) {
 	// Hubs, storage, network adapters and what the relay does not share are left out. Game devices
 	// come first, in a fixed order, so rows do not jump around when they are turned on or off.
 	const devices = relay.devices.filter((d) => !d.blocked).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.title.localeCompare(b.title));
@@ -407,7 +408,8 @@ function RelayView({
 						className="flex flex-wrap items-center justify-end gap-2 text-sm text-muted-foreground"
 						onKeyDown={(e) => e.key === "Escape" && setMenu(false)}
 					>
-						{relay.online && (
+						{/* Pairing is useless where Bluetooth devices cannot connect (Windows hosts). */}
+						{relay.online && bluetooth && (
 							<Button size="sm" variant="ghost" onClick={() => (setPairing(true), setMenu(false))}>
 								Bluetooth devices
 							</Button>
