@@ -363,10 +363,14 @@ impl Daemon {
     fn plugged(&self, slot: &Slot, id: &str, always: bool) {
         let mut tracks = self.tracks.lock().unwrap();
         let t = tracks.entry(slot.clone()).or_default();
-        if t.dropped.is_some() && t.id != id && !t.id.is_empty() {
-            eprintln!("{} came back as {id}; following it", slot.1);
+        // An id not known yet (the relay's list lags a device that just came back) keeps the old one.
+        if !id.is_empty() {
+            if t.dropped.is_some() && t.id != id && !t.id.is_empty() {
+                eprintln!("{} came back as {id}; following it", slot.1);
+            }
+            t.id = id.to_string();
         }
-        (t.id, t.dropped, t.always) = (id.to_string(), None, always);
+        (t.dropped, t.always) = (None, always);
     }
 
     /// Something here reports streams: a source holds a lease or spoke recently, or, for a while
@@ -1110,6 +1114,12 @@ mod tests {
         d.cfg.lock().unwrap().relay.push(relay);
         let slot = ("r".to_string(), "1-2".to_string());
         d.attached.lock().unwrap().insert(slot.clone(), vhci::Attachment { port: 3, hid: None });
+
+        // Plugged in again before the relay's list knows its id: the device keeps the old one.
+        d.plugged(&slot, "054c:09cc", false);
+        d.tracks.lock().unwrap().get_mut(&slot).unwrap().dropped = Some(Instant::now());
+        d.plugged(&slot, "", false);
+        assert_eq!(d.tracks.lock().unwrap()[&slot].id, "054c:09cc");
 
         // No vhci_hcd in this fake sysfs, so every detach fails.
         d.set_session("punktfunk", true, None);
