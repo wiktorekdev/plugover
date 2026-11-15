@@ -28,3 +28,7 @@ ed25519-dalek = { version = "2", default-features = false }
 
 [dev-dependencies]
 ts-rs = "12.0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Pairing Bluetooth devices with the relay through BlueZ.
+zbus = { version = "6.3", default-features = false, features = ["default-rt", "proxy", "service"] }

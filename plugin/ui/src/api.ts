@@ -11,6 +11,7 @@ export type { Kind } from "./generated/Kind";
 export type { Latency } from "./generated/Latency";
 export type { Missing } from "./generated/Missing";
 export type { Mode } from "./generated/Mode";
+export type { Nearby } from "./generated/Nearby";
 export type { Status } from "./generated/Status";
 export type Device = DeviceStatus;
 export type Relay = RelayStatus;

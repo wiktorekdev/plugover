@@ -388,12 +388,17 @@ impl Relay {
         let key = state::decode_key(&host.key)?;
         ensure!(auth::verify(&key, &nonce, proto::REQUEST_CONTEXT, &tag), "{} failed the challenge", host.name);
         let (r, mut w) = tls::wrap(s.try_clone()?, s.try_clone()?, &key, &nonce, true);
-        let result = match proto::recv(&mut BufReader::new(r))? {
-            proto::RelayRequest::Take { busid } => self.take(&busid, &host),
+        let req: proto::RelayRequest = proto::recv(&mut BufReader::new(r))?;
+        let result = match req {
+            proto::RelayRequest::Take { busid } => self.take(&busid, &host).map(|()| None),
+            other => bluetooth(other, &host.name),
         };
-        let reply = proto::RelayReply { ok: result.is_ok(), error: result.as_ref().err().map(|e| format!("{e:#}")) };
+        let reply = match &result {
+            Ok(nearby) => proto::RelayReply { ok: true, nearby: nearby.clone(), ..Default::default() },
+            Err(e) => proto::RelayReply { error: Some(format!("{e:#}")), ..Default::default() },
+        };
         proto::send(&mut w, &reply)?;
-        result
+        result.map(drop)
     }
 
     /// Takes a device back from the host that has it, for `host`, and waits until it is back.
@@ -669,6 +674,32 @@ pub fn open_pairing(state_path: &Path) -> Result<String> {
     let window = PairingWindow { code: auth::new_code(), expires: state::now() + PAIR_MINUTES * 60, attempts: PAIR_ATTEMPTS };
     state::save(&PairingWindow::path(state_path), &window)?;
     Ok(window.code)
+}
+
+/// Pairing on a host's behalf; the reply lists what BlueZ knows afterwards.
+fn bluetooth(req: proto::RelayRequest, host: &str) -> Result<Option<Vec<crate::bluetooth::Nearby>>> {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::bluetooth as bt;
+        match req {
+            proto::RelayRequest::BtScan { seconds } => return Ok(Some(bt::scan(seconds.clamp(1, 30))?)),
+            proto::RelayRequest::BtPair { address } => {
+                eprintln!("{host} pairs Bluetooth device {address}");
+                bt::pair(&bt::address(&address)?)?;
+            }
+            proto::RelayRequest::BtForget { address } => {
+                eprintln!("{host} forgets Bluetooth device {address}");
+                bt::forget(&bt::address(&address)?)?;
+            }
+            proto::RelayRequest::Take { .. } => unreachable!(),
+        }
+        Ok(Some(bt::scan(1)?))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (req, host);
+        bail!("this relay cannot pair Bluetooth devices; only Linux relays can, so far")
+    }
 }
 
 // The fake device tree is sysfs; the Windows relay asks usbipd-win instead.

@@ -19,7 +19,7 @@ pub const PORT: u16 = 7277;
 /// How long the code `plugover ui` puts in the address works.
 const CODE_LIFE: Duration = Duration::from_secs(60);
 /// What the page may ask the daemon; the same list the punktfunk plugin passes through.
-const OPS: &[&str] = &["status", "discover", "pair", "forget", "auto", "label", "attach", "detach", "unencrypted"];
+const OPS: &[&str] = &["status", "discover", "pair", "forget", "auto", "label", "attach", "detach", "unencrypted", "bt_scan", "bt_pair", "bt_forget"];
 const MAX_HEAD: u64 = 16 << 10;
 const MAX_BODY: usize = 64 << 10;
 

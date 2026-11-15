@@ -124,8 +124,12 @@ streams; otherwise it stays connected. A device's details let you:
 
 ### Bluetooth controllers
 
-Pair a Bluetooth controller or keyboard with the relay (for now with `bluetoothctl` or your
-desktop's Bluetooth settings there). While it is connected it shows up next to the USB devices,
+Pair a Bluetooth controller or keyboard with the relay: on the Plugover page, **Bluetooth
+devices** in a relay's menu looks for devices in pairing mode and pairs them; on the relay itself,
+`plugover bluetooth scan`, `plugover bluetooth pair <address>` and `plugover bluetooth forget
+<address>` do the same (as do `bluetoothctl` and your desktop's Bluetooth settings). Devices that
+want a code to be typed, like some keyboards, cannot pair from Plugover yet. While it is connected
+it shows up next to the USB devices,
 with a port like `bt-8c41f2974f28`, and you turn it on like any other device. Plugover does not
 forward the Bluetooth radio: the relay passes the controller's reports on, and a Linux host
 recreates the controller on its Bluetooth bus with the same ids, so its drivers and Steam treat it

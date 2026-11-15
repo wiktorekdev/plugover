@@ -89,13 +89,20 @@ pub struct Pong {
 pub enum RelayRequest {
     /// Take the device back from the host that has it and keep it for this one for a few seconds.
     Take { busid: String },
+    /// Look for Bluetooth input devices for `seconds`; the reply lists them.
+    BtScan { seconds: u64 },
+    /// Pair, trust and connect the Bluetooth device at `address`.
+    BtPair { address: String },
+    BtForget { address: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RelayReply {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nearby: Option<Vec<crate::bluetooth::Nearby>>,
 }
 
 /// What the relay sends on the control channel.

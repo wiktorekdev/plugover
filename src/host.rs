@@ -82,8 +82,9 @@ pub fn pair(address: &str, our_name: &str, code: &str) -> Result<PairedRelay> {
     }
 }
 
-/// Asks the relay one thing on its own connection.
-pub fn request(relay: &PairedRelay, req: &proto::RelayRequest) -> Result<()> {
+/// Asks the relay one thing on its own connection. Pairing a Bluetooth device can take most of a
+/// minute.
+pub fn request(relay: &PairedRelay, req: &proto::RelayRequest) -> Result<proto::RelayReply> {
     let (id, key) = credentials(relay)?;
     let mut s = connect(&relay.address)?;
     let nonce = match proto::challenge(&mut s, proto::REQUEST, &id) {
@@ -94,14 +95,14 @@ pub fn request(relay: &PairedRelay, req: &proto::RelayRequest) -> Result<()> {
         Err(e) => return Err(e.into()),
     };
     s.write_all(&auth::sign(&key, &nonce, proto::REQUEST_CONTEXT))?;
-    s.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(60)))?;
     let (r, mut w) = tls::wrap(s.try_clone()?, s.try_clone()?, &key, &nonce, false);
     proto::send(&mut w, req)?;
     let reply: proto::RelayReply = proto::recv(&mut io::BufReader::new(r))?;
     if !reply.ok {
         bail!("{}", reply.error.unwrap_or_else(|| format!("{} refused", relay.name)));
     }
-    Ok(())
+    Ok(reply)
 }
 
 /// Opens the control channel, encrypted unless the relay is too old to. Returns the connection,

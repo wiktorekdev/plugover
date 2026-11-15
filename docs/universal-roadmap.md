@@ -464,9 +464,15 @@ hardware and recorded in the README compatibility tables.
   with the same ids and name, input reports streamed, an output report and a feature request reached
   the device, and detaching removed the copy. Not verified: a real controller (DualSense, DS4,
   Switch Pro, Xbox), latency, the relay's own drivers interfering, long sessions.
-- Not done yet: pairing from the Plugover page or CLI (BlueZ over D-Bus, needs `zbus`); for now
-  pair on the relay with `bluetoothctl`. The relay keeps its own driver bound, so a relay that is
-  also a desktop sees the controller too.
+- Pairing (src/bluetooth.rs, `zbus` 6 with its own async runtime, driven through
+  `zbus::block_on`): scan, pair (registers an `Agent1` with `NoInputNoOutput`, so passkey
+  keyboards cannot pair yet), trust, connect, forget. On the relay with `plugover bluetooth`, and
+  from the page through new `PLR1` requests (`bt_scan`, `bt_pair`, `bt_forget`) whose reply lists
+  what BlueZ knows. Controllers paired by cable (DualShock 4, DualSense through BlueZ's sixaxis
+  plugin) have no icon or class, so `CablePairing` also counts as an input device and as paired.
+  Verified: a scan from the page through a test host and relay found the real DualShock 4 the
+  relay knows. Not verified: pairing a controller in pairing mode end to end.
+- The relay keeps its own driver bound, so a relay that is also a desktop sees the controller too.
 - `zbus` pairing with agent, `hidraw` tap, `PLC3` and `PLH1`, `uhid` on the host, UI and CLI
   (`plugover bt scan|pair|forget`).
 - Test devices: DualSense (rumble, triggers, motion, touchpad), DualShock 4, Switch Pro, Xbox

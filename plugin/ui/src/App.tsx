@@ -20,6 +20,7 @@ import {
 	type Latency,
 	type Missing,
 	type Mode,
+	type Nearby,
 	newer,
 	type Relay,
 	SOURCE_LABEL,
@@ -354,6 +355,7 @@ function RelayView({
 	const relayOlder = !relay.version || (hostVersion !== undefined && newer(hostVersion, relay.version));
 	const slow = relay.online && relay.latency && !steady(relay.latency);
 	const [repairing, setRepairing] = useState(false);
+	const [pairing, setPairing] = useState(false);
 	const [menu, setMenu] = useState(false);
 	// Several of the same model: rows say which port is which.
 	const twins = (d: Device) => relay.devices.filter((o) => o.id === d.id).length > 1;
@@ -405,6 +407,11 @@ function RelayView({
 						className="flex flex-wrap items-center justify-end gap-2 text-sm text-muted-foreground"
 						onKeyDown={(e) => e.key === "Escape" && setMenu(false)}
 					>
+						{relay.online && (
+							<Button size="sm" variant="ghost" onClick={() => (setPairing(true), setMenu(false))}>
+								Bluetooth devices
+							</Button>
+						)}
 						<Button size="sm" variant="ghost" onClick={() => setRepairing(true)}>
 							Pair again
 						</Button>
@@ -459,6 +466,8 @@ function RelayView({
 			)}
 
 			{relay.online && !relay.encrypted && <Unencrypted relay={relay} refresh={refresh} />}
+
+			{pairing && relay.online && <BluetoothPairing relay={relay} onClose={() => setPairing(false)} refresh={refresh} />}
 
 			{slow && relay.latency && <SlowLink relay={relay.name} latency={relay.latency} />}
 
@@ -824,5 +833,73 @@ function ForgetButton({ relay, refresh }: { relay: Relay; refresh: () => Promise
 				Cancel
 			</Button>
 		</span>
+	);
+}
+
+/** Pairs Bluetooth controllers and keyboards with the relay; once connected they show up as its devices. */
+function BluetoothPairing({ relay, onClose, refresh }: { relay: Relay; onClose: () => void; refresh: () => Promise<void> }) {
+	const [nearby, setNearby] = useState<Nearby[]>();
+	const [busy, setBusy] = useState<string>();
+	const run = async (op: string, body: object, what: string, done?: string) => {
+		setBusy(what);
+		try {
+			const r = await call<{ nearby: Nearby[] }>(op, { relay: relay.id, ...body });
+			setNearby(r.nearby);
+			if (done) toast.success(done);
+			await refresh();
+		} catch (e) {
+			toast.error((e as Error).message);
+		}
+		setBusy(undefined);
+	};
+	const scan = () => run("bt_scan", { seconds: 8 }, "scan");
+	// biome-ignore lint/correctness/useExhaustiveDependencies: once, when it opens
+	useEffect(() => void scan(), []);
+	return (
+		<Card className="flex flex-col gap-3">
+			<div className="flex items-start justify-between gap-4">
+				<div>
+					<p className="font-medium">Bluetooth devices on {relay.name}</p>
+					<p className="mt-1 text-sm text-muted-foreground">
+						Put the controller in pairing mode first: hold Share and PS on a DualShock 4 or DualSense, the pair button on an Xbox
+						controller, or Sync on a Switch controller, until its light flashes quickly.
+					</p>
+				</div>
+				<Button size="sm" variant="ghost" onClick={onClose}>
+					Close
+				</Button>
+			</div>
+			{nearby?.map((d) => (
+				<div key={d.address} className="flex items-center gap-3">
+					<div className="min-w-0 flex-1">
+						<p className="[overflow-wrap:anywhere]">{d.name || d.address}</p>
+						<p className="text-sm text-muted-foreground">
+							{d.address} · {d.connected ? "Connected" : d.paired ? "Paired, turn it on to connect" : "Ready to pair"}
+						</p>
+					</div>
+					{d.paired ? (
+						<Button size="sm" variant="ghost" disabled={!!busy} onClick={() => run("bt_forget", { address: d.address }, d.address, `Forgot ${d.name}`)}>
+							{busy === d.address ? <Spinner /> : "Forget"}
+						</Button>
+					) : (
+						<Button size="sm" disabled={!!busy} onClick={() => run("bt_pair", { address: d.address }, d.address, `Paired ${d.name}`)}>
+							{busy === d.address ? <Spinner /> : "Pair"}
+						</Button>
+					)}
+				</div>
+			))}
+			{nearby?.length === 0 && <p className="text-sm text-muted-foreground">No Bluetooth input devices found.</p>}
+			<div>
+				<Button size="sm" variant="outline" disabled={!!busy} onClick={scan}>
+					{busy === "scan" ? (
+						<>
+							<Spinner /> Looking for devices
+						</>
+					) : (
+						"Look again"
+					)}
+				</Button>
+			</div>
+		</Card>
 	);
 }

@@ -77,6 +77,11 @@ pub enum Request {
     Detach { relay: Option<String>, busid: String },
     /// Allows connecting a relay's devices without encryption, for a relay too old to encrypt.
     Unencrypted { relay: String, on: bool },
+    /// Bluetooth on the relay: look for input devices, pair one, or forget one. Each answers with
+    /// the devices the relay knows.
+    BtScan { relay: Option<String>, seconds: u64 },
+    BtPair { relay: Option<String>, address: String },
+    BtForget { relay: Option<String>, address: String },
     /// A one-time code for `plugover ui`. Not for the page itself, which cannot ask for one.
     UiCode,
     /// A stream started or stopped. Each `source` (the punktfunk plugin, a host app's hook, the
@@ -227,6 +232,12 @@ impl Daemon {
     }
 
     /// One relay by id or name; with a single paired relay the argument may be left out.
+    /// Asks the relay to scan, pair or forget, and answers with the devices it then knows.
+    fn bluetooth(&self, relay: Option<String>, req: proto::RelayRequest) -> Result<Value> {
+        let reply = host::request(&self.pick(relay.as_deref())?, &req)?;
+        Ok(json!({ "ok": true, "nearby": reply.nearby.unwrap_or_default() }))
+    }
+
     fn pick(&self, relay: Option<&str>) -> Result<PairedRelay> {
         let cfg = self.cfg.lock().unwrap();
         match relay {
@@ -710,6 +721,9 @@ impl Daemon {
                 self.reconcile();
                 json!({ "ok": true })
             }
+            Request::BtScan { relay, seconds } => self.bluetooth(relay, proto::RelayRequest::BtScan { seconds })?,
+            Request::BtPair { relay, address } => self.bluetooth(relay, proto::RelayRequest::BtPair { address })?,
+            Request::BtForget { relay, address } => self.bluetooth(relay, proto::RelayRequest::BtForget { address })?,
             Request::UiCode => json!({ "ok": true, "code": self.ui.code(), "port": crate::ui::PORT }),
             Request::Session { active, source, ttl, port } => {
                 anyhow::ensure!(!source.is_empty() && source.len() <= 64, "a session source needs a short name");

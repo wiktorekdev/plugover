@@ -10,7 +10,8 @@ import { join } from "node:path";
 const WINDOWS = process.platform === "win32";
 const WINDOWS_PORT = 7276;
 /** Longest a request may take: a pairing or a slow attach is a few seconds. */
-const TIMEOUT_MS = 30_000;
+// Pairing a Bluetooth device through the relay can take most of a minute.
+const TIMEOUT_MS = 75_000;
 const PROGRAM_DATA = join(process.env.ProgramData ?? "C:\\ProgramData", "Plugover");
 const SOCKET = join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local/state"), "plugover", "host.sock");
 

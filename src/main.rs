@@ -3,6 +3,7 @@
 
 mod api;
 mod auth;
+mod bluetooth;
 mod catalog;
 mod cli;
 mod discovery;
@@ -203,6 +204,10 @@ enum Cmd {
         #[arg(long, default_value_os_t = relay_state())]
         state: PathBuf,
     },
+    /// Pair Bluetooth controllers and keyboards with this relay, so hosts can use them (on the
+    /// relay; hosts can also do this from the Plugover page).
+    #[command(subcommand)]
+    Bluetooth(BluetoothCmd),
     /// Lend devices to paired hosts (the relay service runs this).
     #[command(hide = true)]
     Relay {
@@ -238,6 +243,23 @@ enum Cmd {
         #[arg(long)]
         hook: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum BluetoothCmd {
+    /// Look for Bluetooth input devices nearby, and list the paired ones.
+    Scan {
+        /// How long to look, in seconds.
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u64).range(1..=60))]
+        seconds: u64,
+    },
+    /// Pair a device in pairing mode, trust it and connect it.
+    Pair {
+        /// Its address, from `plugover bluetooth scan`, such as 8C:41:F2:97:4F:28.
+        address: String,
+    },
+    /// Unpair a device.
+    Forget { address: String },
 }
 
 #[cfg(not(windows))]
@@ -400,6 +422,30 @@ fn run(cli: Cli) -> Result<()> {
                 println!("Open this address in a browser on this computer within a minute: {url}");
             }
         }
+        #[cfg(target_os = "linux")]
+        Cmd::Bluetooth(b) => match b {
+            BluetoothCmd::Scan { seconds } => {
+                println!("{}", paint(DIM, format!("Looking for {seconds} s; put controllers in pairing mode now.")));
+                let found = bluetooth::scan(seconds)?;
+                if found.is_empty() {
+                    println!("No Bluetooth input devices found.");
+                }
+                for d in found {
+                    let state = if d.connected { paint(GOOD, "connected") } else if d.paired { paint(DIM, "paired") } else { paint(ACCENT, "pairable") };
+                    println!("  {}  {}  {state}", paint(BOLD, &d.address), d.name);
+                }
+            }
+            BluetoothCmd::Pair { address } => {
+                bluetooth::pair(&bluetooth::address(&address)?)?;
+                done(format!("Paired {}. Hosts see it while it is connected.", paint(BOLD, &address)));
+            }
+            BluetoothCmd::Forget { address } => {
+                bluetooth::forget(&bluetooth::address(&address)?)?;
+                done(format!("Forgot {}.", paint(BOLD, &address)));
+            }
+        },
+        #[cfg(not(target_os = "linux"))]
+        Cmd::Bluetooth(_) => anyhow::bail!("pairing Bluetooth devices with a relay works on Linux relays only, so far"),
         Cmd::Session { state, source, ttl, port, hook } => {
             if let Err(e) = call(Request::Session { active: state == "start", source, ttl, port }) {
                 anyhow::ensure!(hook, e);
