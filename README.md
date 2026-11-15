@@ -107,7 +107,14 @@ the devices plugged into it. Without punktfunk, `plugover ui` opens the same pag
 |---|---|
 | punktfunk | its console plugin, which setup adds |
 | Sunshine and its forks (Apollo, Vibeshine, Vibepollo, Foundation Sunshine, LuminalShine, Polaris, Hermes, SolarFlare) | a prep command in the app's config, which host setup adds (run it again after installing the app, then restart the app). It runs before the game starts, so devices are there when the game looks for them. Apps with "exclude global prep commands" set skip it. |
+| Wolf (Linux) | its API socket, `/var/run/wolf/wolf.sock`, which belongs to root: give your user access to it. Plugover plugs devices into the host, not into Wolf's app containers; passing them on to a container is up to your Wolf config. Experimental. |
+| Parsec (Windows) | its log, `log.txt`: a stream runs while a client is connected and Parsec runs. Experimental. |
+| Steam Remote Play | its log, `logs/streaming_log.txt`: from "Streaming started to" until the stream's end line, or until Steam quits. Experimental. |
 | anything else | devices stay connected, or call `plugover session start` and `stop` from the app's own hooks |
+
+Plugover follows Wolf, Parsec and Steam once they are installed; nothing needs setting up. Having
+them installed does not change when devices connect: only after one of them has streamed here does
+**automatically** mean "during streams".
 
 Setup finds Sunshine-family configs in `~/.config/<app>/` on Linux (and the Flatpak's) and in
 `Program Files\<app>\config\sunshine.conf` on Windows; `plugover doctor` says which ones it
@@ -190,6 +197,9 @@ storage and network adapters are never shared. Set `NO_COLOR=1` to turn off colo
 | punktfunk | **Tested** |
 | Sunshine and forks on Linux | Hook built and run against a stand-in, not with a real Sunshine yet |
 | Sunshine and forks on Windows | Built, not tested yet |
+| Wolf | Built and tested against a stand-in socket, not with a real Wolf yet |
+| Parsec | Built and tested against logged lines from others; not with a real Parsec yet |
+| Steam Remote Play | Followed through a log written by hand on Linux; the end lines come from another project, not from a real stream yet |
 
 | Bluetooth | Status |
 |---|---|

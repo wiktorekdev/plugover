@@ -512,10 +512,25 @@ impl Daemon {
     }
 
     /// Checks the host apps of hooked sources: one that answers keeps its source watching; one that
-    /// stopped answering mid-stream (it crashed, so its hook never said stop) ends its stream.
+    /// stopped answering mid-stream (it crashed, so its hook never said stop) ends its stream. Also
+    /// follows the apps Plugover watches without a hook (Wolf, Parsec, Steam Remote Play).
     fn probe_hosts(&self) {
         let mut misses: HashMap<String, u32> = HashMap::new();
+        let mut apps = crate::follow::find();
         loop {
+            for app in &mut apps {
+                let Some(streaming) = app.poll() else { continue };
+                let source = app.source();
+                let held = self.leases.lock().unwrap().contains_key(source);
+                if streaming != held {
+                    eprintln!("{} {}", app.title(), if streaming { "started a stream" } else { "stopped streaming" });
+                    self.set_session(source, streaming, None);
+                } else if self.cfg.lock().unwrap().remembered_sources().iter().any(|s| s == source) {
+                    // An app that streamed here before keeps this host watching while it can be asked.
+                    // Only having it installed does not: Steam is on nearly every gaming PC.
+                    self.heard.lock().unwrap().insert(source.to_string(), Instant::now());
+                }
+            }
             let watch = self.cfg.lock().unwrap().watch.clone();
             for (source, port) in watch {
                 let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));

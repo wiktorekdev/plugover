@@ -484,8 +484,25 @@ hardware and recorded in the README compatibility tables.
   passed through as a USB device, gives a Windows host full Bluetooth with no new code. Linux to
   Linux Bluetooth stays, experimental, and goes too if real controllers show it is not worth it.
 
-**Phase 6: dedicated adapters**
-- Wolf (sessions and container placement), then Parsec and Steam Remote Play as experimental.
+**Phase 6: dedicated adapters** (sessions done in the working tree, not released)
+- Done: `src/follow.rs`, polled by the host daemon every 5 s next to the hooked apps' ports. Wolf:
+  `GET /api/v1/sessions` on `/var/run/wolf/wolf.sock` (from Wolf's `unix_socket_server.cpp`,
+  read 2026-11-15); a stream runs while it lists a session. Polling rather than `/api/v1/events`,
+  which replays nothing and has had bugs with slow subscribers. Parsec (Windows): `log.txt` in
+  ProgramData or any user's AppData (the daemon runs as SYSTEM), counting `name#id connected.` and
+  `disconnected.`, cleared by `===== Parsec: Started =====` and when `parsecd.exe` no longer runs.
+  Steam Remote Play: `streaming_log.txt`, started by `Streaming started to`, ended by `PipeWire:
+  Deinitializing streaming` (Linux) or `Encoding complete` (Windows), both as SpoutRemotePlayHost
+  documents them, or when Steam no longer runs. A log that shrank starts over.
+- Unlike the plan above, they are on without being chosen, but being installed does not make a host
+  "watching": only a stream seen here does, after which the app keeps it watching while it can be
+  asked. Steam is on almost every gaming PC, so mere presence would change what auto means.
+- Verified: unit tests with real log lines from others and a stand-in Wolf socket; the daemon
+  followed a hand-written Steam log (start and end) on this machine; doctor lists what it follows.
+  Not verified: a real Wolf, Parsec or Steam Remote Play stream. The Linux PipeWire sink
+  (`steam-streaming-playback`) would be a firmer Steam signal if the end line proves unreliable.
+- Not done: placing devices in Wolf's app containers. Plugover attaches them on the host; a Wolf
+  app sees them only if its container is given the device nodes.
 
 ## 6. Verification policy
 
