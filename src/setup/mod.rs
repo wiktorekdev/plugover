@@ -300,11 +300,16 @@ fn asset(version: &str) -> String {
     }
 }
 
+/// The newest release's version, from GitHub.
+pub fn latest_release() -> Result<String> {
+    let release: serde_json::Value = serde_json::from_str(&exec(Command::new(curl()).args(["-fsSL", "-m", "20", "-H", "Accept: application/vnd.github+json", RELEASES]))?)
+        .context("GitHub answered something unexpected")?;
+    Ok(release["tag_name"].as_str().context("the latest release has no tag")?.trim_start_matches('v').to_string())
+}
+
 /// Installs the newest release over whatever is set up here, keeping pairings and settings.
 pub fn update(check_only: bool, yes: bool) -> Result<()> {
-    let release: serde_json::Value = serde_json::from_str(&exec(Command::new(curl()).args(["-fsSL", "-H", "Accept: application/vnd.github+json", RELEASES]))?)
-        .context("GitHub answered something unexpected")?;
-    let latest = release["tag_name"].as_str().context("the latest release has no tag")?.trim_start_matches('v').to_string();
+    let latest = latest_release()?;
     if !newer(&latest, VERSION) {
         ok(&format!("Plugover {VERSION} is up to date"), "");
         return Ok(());
@@ -380,7 +385,7 @@ const LOGO: [&str; 6] = [
     "██║     ███████╗╚██████╔╝╚██████╔╝╚██████╔╝ ╚████╔╝ ███████╗██║  ██║",
     "╚═╝     ╚══════╝ ╚═════╝  ╚═════╝  ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═╝",
 ];
-const TAGLINE: &str = "USB devices from another computer, for punktfunk";
+const TAGLINE: &str = "USB devices from another computer, for game streaming";
 
 /// Violet to pink across `width` columns; 256-color steps where truecolor is not known to work.
 fn gradient(text: &str, width: usize) -> String {

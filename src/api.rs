@@ -22,6 +22,9 @@ pub struct Status {
     /// This host can take a relay's Bluetooth devices (Linux hosts, through uhid).
     #[serde(default)]
     pub bluetooth: bool,
+    /// A newer Plugover release, once the daemon has seen one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<String>,
     pub relays: Vec<RelayStatus>,
 }
 

@@ -21,4 +21,8 @@ watching: boolean,
 /**
  * This host can take a relay's Bluetooth devices (Linux hosts, through uhid).
  */
-bluetooth: boolean, relays: Array<RelayStatus>, };
+bluetooth: boolean, 
+/**
+ * A newer Plugover release, once the daemon has seen one.
+ */
+update?: string | null, relays: Array<RelayStatus>, };

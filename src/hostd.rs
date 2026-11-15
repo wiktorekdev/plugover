@@ -169,6 +169,8 @@ pub struct Daemon {
     /// When each source last said anything about streams.
     heard: Mutex<HashMap<String, Instant>>,
     started: Instant,
+    /// A newer release, from the daily look at GitHub.
+    update: Mutex<Option<String>>,
     /// Who may use the page `plugover ui` opens.
     pub ui: crate::ui::Gate,
     /// Some lease holds, as last applied.
@@ -199,6 +201,7 @@ impl Daemon {
             leases: Mutex::default(),
             heard: Mutex::default(),
             started: Instant::now(),
+            update: Mutex::default(),
             ui: crate::ui::Gate::new(),
             session: AtomicBool::new(false),
             reconciling: Mutex::default(),
@@ -214,6 +217,19 @@ impl Daemon {
         thread::spawn(move || crate::ui::serve(page));
         let probe = self.clone();
         thread::spawn(move || probe.probe_hosts());
+        let releases = self.clone();
+        thread::spawn(move || {
+            // A while after starting, then twice a day; a failed look just waits for the next.
+            thread::sleep(Duration::from_secs(60));
+            loop {
+                if let Ok(v) = crate::setup::latest_release()
+                    && crate::setup::newer(&v, proto::VERSION)
+                {
+                    *releases.update.lock().unwrap() = Some(v);
+                }
+                thread::sleep(Duration::from_secs(12 * 3600));
+            }
+        });
         let me = self.clone();
         // Also notices a device that dropped out, to plug it in again; reading vhci's status is cheap.
         thread::spawn(move || loop {
@@ -822,7 +838,7 @@ impl Daemon {
                 }
             })
             .collect();
-        api::Status { host: self.name.clone(), version: proto::VERSION.into(), session: self.session.load(Ordering::SeqCst), sessions, watching, bluetooth: cfg!(target_os = "linux"), relays }
+        api::Status { host: self.name.clone(), version: proto::VERSION.into(), session: self.session.load(Ordering::SeqCst), sessions, watching, bluetooth: cfg!(target_os = "linux"), update: self.update.lock().unwrap().clone(), relays }
     }
 
     fn answer<S: Read + Write>(me: &Arc<Self>, read: S, mut write: S, token: Option<&str>) {
@@ -921,7 +937,10 @@ pub fn call(endpoint: &Path, req: &Request) -> Result<Value> {
         .with_context(|| format!("the host daemon is not running ({}); start `plugover host`", endpoint.display()))?;
     #[cfg(windows)]
     let s = {
-        let token = fs::read_to_string(endpoint).context("the host daemon is not running (no token file)")?;
+        let token = fs::read_to_string(endpoint).map_err(|e| match e.kind() {
+            std::io::ErrorKind::PermissionDenied => anyhow::anyhow!("only administrators may talk to the host daemon; run this in an administrator terminal"),
+            _ => anyhow::anyhow!("the host daemon is not running (no token file)"),
+        })?;
         msg["token"] = json!(token.trim());
         std::net::TcpStream::connect(("127.0.0.1", API_PORT)).context("the host daemon is not running")?
     };

@@ -105,6 +105,13 @@ export function App() {
 		content = (
 			<>
 				<StreamBanner status={status} />
+				{status.update && (
+					<Card muted className="flex-row items-center gap-4">
+						<p className="text-sm">
+							Plugover {status.update} is out. Update with <Cmd>plugover update</Cmd> on this computer and on each relay.
+						</p>
+					</Card>
+				)}
 				{status.relays.map((r) => (
 					<RelayView key={r.id} relay={r} hostVersion={status.version} session={status.session} watching={status.watching} bluetooth={status.bluetooth} refresh={refresh} />
 				))}

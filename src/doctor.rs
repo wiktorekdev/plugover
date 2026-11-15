@@ -151,6 +151,9 @@ fn check_host(endpoint: &Path) -> bool {
         }
     };
     let daemon = (!status.version.is_empty()).then_some(status.version.as_str());
+    if let Some(v) = &status.update {
+        warn("Plugover", format!("{v} is out, this host runs {}", proto::VERSION), Some(&format!("{} here and on the relay", cmd("plugover update"))));
+    }
     if daemon == Some(proto::VERSION) {
         let stream = match status.sessions.as_slice() {
             [] if status.session => "running, a stream is on".to_string(),

@@ -23,6 +23,27 @@ fn installed_exe() -> PathBuf {
     install_dir().join("plugover.exe")
 }
 
+/// PowerShell that adds (`add`) or removes the install folder from the machine's PATH, so
+/// `plugover` runs in any new terminal. The raw value keeps its %SystemRoot%-style entries, and
+/// the dummy variable makes Windows tell running programs, Explorer included, that PATH changed.
+fn path_script(add: bool) -> String {
+    format!(
+        "$dir = {dir}
+         $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', $true)
+         $old = [string]$k.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+         $parts = @($old -split ';' | Where-Object {{ $_ -and $_.TrimEnd('\\') -ne $dir }})
+         if ({add}) {{ $parts += $dir }}
+         $new = $parts -join ';'
+         if ($new -ne $old.TrimEnd(';')) {{
+             $k.SetValue('Path', $new, 'ExpandString')
+             [Environment]::SetEnvironmentVariable('PlugoverPathChanged', '1', 'User')
+             [Environment]::SetEnvironmentVariable('PlugoverPathChanged', $null, 'User')
+         }}\n",
+        dir = q(install_dir()),
+        add = if add { "$true" } else { "$false" },
+    )
+}
+
 /// Runs a PowerShell script. Passed encoded, so no quoting survives the command line by luck.
 fn ps(script: &str) -> Result<String> {
     let script = encode(&format!("$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n{script}"));
@@ -293,6 +314,7 @@ fn install_self() -> Result<()> {
     if !is_me(&installed_exe()) {
         fs::copy(std::env::current_exe()?, installed_exe()).context("copying plugover.exe into Program Files")?;
     }
+    ps(&path_script(true)).context("adding Plugover to PATH")?;
     // Keys stay readable by SYSTEM and administrators only; the punktfunk plugin runs as LOCAL
     // SERVICE and may read just the api folder with the host daemon's token.
     let data = crate::program_data();
@@ -503,6 +525,7 @@ fn remove(relay: bool, host: bool, everything: bool, purge: bool) -> Result<()> 
         }
     }
     if everything {
+        script += &path_script(false);
         script += &format!("Get-Process plugover -ErrorAction SilentlyContinue | Where-Object Id -ne {} | Stop-Process -Force\n", std::process::id());
     }
     if relay {

@@ -92,6 +92,9 @@ pub fn print_status(st: &Status) {
             _ => paint(DIM, "○ no stream"),
         }
     );
+    if let Some(v) = &st.update {
+        println!("{} {}", paint(ACCENT.bold(), format!("Plugover {v} is out.")), paint(DIM, format!("Update with {} here and on the relay.", cmd("plugover update"))));
+    }
     if st.relays.is_empty() {
         println!("\nNo relay paired yet. Run {} here, or open Plugover in the punktfunk console.", cmd("plugover pair"));
     }
