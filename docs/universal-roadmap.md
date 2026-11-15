@@ -471,11 +471,21 @@ hardware and recorded in the README compatibility tables.
 - Verified on this machine with a simulated Bluetooth gamepad made with uhid (a Valve vendor id, so
   the Steam udev rule let an unprivileged test relay open it): the host's copy appeared on bus 0005
   with the same ids and name, input reports streamed, an output report and a feature request reached
-  the device, and detaching removed the copy. Not verified: a real controller (DualSense, DS4,
-  Switch Pro, Xbox), latency, the relay's own drivers interfering, long sessions.
+  the device, and detaching removed the copy.
+- Verified 2026-11-15 with two real DualShock 4s (054c:09cc) over Bluetooth, a test relay and a test
+  host on one machine: hid-playstation on the host bound the copy and read the pad's firmware and
+  hardware versions through Plugover (feature reports); buttons, sticks, touchpad and motion
+  sensors reached the copy (about 2000, 180 and 12000 events in 15 s); rumble sent through the
+  copy's force feedback made the pad vibrate and the copy's driver set the light bar red, both
+  confirmed by hand (output reports); the relay held the original's input node (EVIOCGRAB, another
+  grab got EBUSY). On one machine hid-playstation refuses a second DS4 with the same MAC
+  ("Duplicate device found"), so this test used a build whose copy got a changed MAC; across two
+  machines the MAC stays as it is. One pad at 5 % battery dropped its Bluetooth link twice;
+  Plugover saw it go and come back. Not verified: two machines, DualSense, Switch Pro, Xbox,
+  latency, long sessions.
 - Pairing (src/bluetooth.rs, `zbus` 6 with its own async runtime, driven through
-  `zbus::block_on`): scan, pair (registers an `Agent1` with `NoInputNoOutput`, so passkey
-  keyboards cannot pair yet), trust, connect, forget. On the relay with `plugover bluetooth`, and
+  `zbus::block_on`): scan, pair (registers an `Agent1` with `NoInputNoOutput`: Simple Pairing
+  then needs no code, and a legacy keyboard asking for a PIN gets 0000), trust, connect, forget. On the relay with `plugover bluetooth`, and
   from the page through new `PLR1` requests (`bt_scan`, `bt_pair`, `bt_forget`) whose reply lists
   what BlueZ knows. Controllers paired by cable (DualShock 4, DualSense through BlueZ's sixaxis
   plugin) have no icon or class, so `CablePairing` also counts as an input device and as paired.

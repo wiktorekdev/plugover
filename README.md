@@ -205,7 +205,7 @@ storage and network adapters are never shared. Set `NO_COLOR=1` to turn off colo
 
 | Bluetooth | Status |
 |---|---|
-| Linux relay to Linux host | Experimental. Tested with a simulated Bluetooth gamepad (input, output and feature reports); no real controller yet |
+| Linux relay to Linux host | Experimental. **Tested** with two DualShock 4s (buttons, sticks, touchpad, motion sensors, rumble, light bar), relay and host on one machine; not yet across two machines, nor DualSense, Switch Pro or Xbox pads |
 | Windows relay or host | Not planned; pass a USB Bluetooth adapter through instead |
 
 | Device | USB id | Status |
