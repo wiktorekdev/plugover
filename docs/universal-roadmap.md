@@ -26,9 +26,8 @@ Status: proposal, nothing implemented. Written 2026-11-14 against Plugover 0.6.0
    with BlueZ, reads and writes them through `hidraw`, and sends HID reports over a new encrypted
    channel whose messages map one to one onto Linux `uhid`. A Linux host recreates the device with
    `uhid` on `BUS_BLUETOOTH`, so the kernel and Steam see a real Bluetooth controller with no
-   translation. A Windows host presents it as a synthesized USB HID device over the usbip-win2
-   driver Plugover already installs, with per-device translation profiles where Windows drivers
-   expect the USB report format (DualSense, DualShock 4, Switch Pro, Xbox).
+   translation. Windows hosts do not get this (Phase 5 was dropped); they use a USB Bluetooth
+   adapter on the relay, passed through as a USB device.
 7. **A standalone UI** served by the host daemon on loopback, reusing the existing React page, so
    people without punktfunk get the same experience.
 8. **Compatibility is claimed only after a test on real hardware**, recorded in the README tables,
@@ -321,7 +320,7 @@ the source), and Steam and SDL see a Bluetooth controller through `hidraw`. No t
 feature parity by construction, including adaptive triggers and motion. Requires `/dev/uhid`
 access: setup adds a udev rule for the Plugover user, the same way it handles `vhci_hcd` now.
 
-#### Windows host
+#### Windows host (dropped with Phase 5; kept for the record)
 
 Windows has no user-mode `uhid`; its virtual HID framework is kernel mode and would need a signed
 driver. Instead, the host daemon synthesizes a **USB HID device** and serves it on the loopback
@@ -478,13 +477,15 @@ hardware and recorded in the README compatibility tables.
 - Test devices: DualSense (rumble, triggers, motion, touchpad), DualShock 4, Switch Pro, Xbox
   Wireless, a BT keyboard with passkey pairing.
 
-**Phase 5: Bluetooth to Windows hosts**
-- Synthesized USB HID device on the loopback USB/IP proxy, generic profile, then the translation
-  profiles one device at a time.
+**Phase 5: Bluetooth to Windows hosts** (dropped, 2026-11-15)
+- Was: a synthesized USB HID device on the loopback USB/IP proxy, a generic profile, then
+  translation profiles one device at a time. Dropped because it is a large amount of per-model code
+  for little gain: streaming clients already forward pads, and a USB Bluetooth adapter on the relay,
+  passed through as a USB device, gives a Windows host full Bluetooth with no new code. Linux to
+  Linux Bluetooth stays, experimental, and goes too if real controllers show it is not worth it.
 
 **Phase 6: dedicated adapters**
 - Wolf (sessions and container placement), then Parsec and Steam Remote Play as experimental.
-- Windows relay Bluetooth, experimental.
 
 ## 6. Verification policy
 

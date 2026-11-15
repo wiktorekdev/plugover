@@ -133,9 +133,13 @@ it shows up next to the USB devices,
 with a port like `bt-8c41f2974f28`, and you turn it on like any other device. Plugover does not
 forward the Bluetooth radio: the relay passes the controller's reports on, and a Linux host
 recreates the controller on its Bluetooth bus with the same ids, so its drivers and Steam treat it
-as if it were paired with the host itself, rumble, lights and motion sensors included. Windows
-hosts cannot take Bluetooth devices yet; a USB Bluetooth adapter plugged into the relay can still
-be passed through as a USB device.
+as if it were paired with the host itself, rumble, lights and motion sensors included.
+
+This works between a Linux relay and a Linux host only, and is experimental. Windows hosts and
+relays will not get it: Windows cannot recreate a Bluetooth device the way Linux does. For a
+Windows host, plug a USB Bluetooth adapter into the relay, pass the adapter through like any USB
+device, and pair the controller with the host itself. Pads paired with the device your streaming
+client runs on usually need no Plugover at all, as the client forwards them.
 
 A device another host has shows **Take over**: the relay takes it back from that host and keeps it
 for this one. Both hosts need Plugover 0.7 or newer on the relay.
@@ -189,8 +193,8 @@ storage and network adapters are never shared. Set `NO_COLOR=1` to turn off colo
 
 | Bluetooth | Status |
 |---|---|
-| Linux relay to Linux host | Tested with a simulated Bluetooth gamepad (input, output and feature reports); no real controller yet |
-| Windows relay or host | Not supported yet |
+| Linux relay to Linux host | Experimental. Tested with a simulated Bluetooth gamepad (input, output and feature reports); no real controller yet |
+| Windows relay or host | Not planned; pass a USB Bluetooth adapter through instead |
 
 | Device | USB id | Status |
 |---|---|---|
