@@ -25,7 +25,20 @@ always: boolean,
 /**
  * Why the last try to connect it failed, while it keeps failing.
  */
-error: string | null, history: History, busid: string, 
+error: string | null, history: History, 
+/**
+ * While a stream runs on a screen of its own (a headless gamescope), its keyboard or mouse
+ * goes there instead of to the desktop: the screen's name.
+ */
+routed: string | null, 
+/**
+ * Why its keyboard or mouse cannot be passed into that screen.
+ */
+route_error: string | null, 
+/**
+ * Its keyboard and mouse stay with this computer's desktop even then.
+ */
+desktop: boolean, busid: string, 
 /**
  * vendor:product, e.g. 046d:c24f.
  */
@@ -34,6 +47,10 @@ id: string,
  * Name of the host that has it right now.
  */
 lent_to: string | null, 
+/**
+ * Its USB serial number, when it has a real one; older relays send none.
+ */
+serial?: string | null, 
 /**
  * What the UI shows: "Logitech G29 Driving Force", without repeating the maker.
  */

@@ -1,6 +1,6 @@
 [package]
 name = "plugover"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 description = "Hands USB devices plugged into one machine to a punktfunk host over the network"
 license = "MIT"
@@ -32,3 +32,9 @@ ts-rs = "12.0.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Pairing Bluetooth devices with the relay through BlueZ.
 zbus = { version = "6.3", default-features = false, features = ["default-rt", "proxy", "service"] }
+# Passing keyboards and mice into a stream's own screen (gamescope) through libei.
+reis = { version = "0.7.1", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+# The punktfunk plugin's named pipe: its AppContainer may not reach loopback TCP.
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }

@@ -15,6 +15,8 @@ mod hostd;
 mod net;
 mod proto;
 mod relay;
+#[cfg(target_os = "linux")]
+mod route;
 mod setup;
 mod state;
 mod sunshine;
@@ -134,6 +136,14 @@ enum Cmd {
         /// Which relay, by name or id; needed only when several are paired.
         #[arg(long)]
         relay: Option<String>,
+    },
+    /// Keep a keyboard or mouse with this computer's desktop when a stream runs the game on a
+    /// screen of its own, instead of passing it into the game (`off` passes it on again).
+    Desktop {
+        /// vendor:product, see `plugover status`.
+        device: String,
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
     },
     /// Open the Plugover page in your browser, for when you do not use the punktfunk console.
     Ui,
@@ -294,8 +304,7 @@ fn relay_state() -> PathBuf {
     "/var/lib/plugover/relay.toml".into()
 }
 
-/// Its own folder: the installer lets the punktfunk plugin (LOCAL SERVICE) read this one, not the
-/// keys next to it.
+/// Its own folder, readable by administrators only.
 #[cfg(windows)]
 fn endpoint() -> PathBuf {
     program_data().join("api").join("api-token")
@@ -456,6 +465,15 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Attach { busid, relay, take } => {
             let v = call(Request::Attach { relay, busid: busid.clone(), take })?;
             done(format!("Connected {} (virtual port {}).", paint(BOLD, busid), v["port"]));
+        }
+        Cmd::Desktop { device, state } => {
+            let on = state == "on";
+            call(Request::Desktop { device: device.clone(), on })?;
+            done(if on {
+                format!("{} stays with this computer's desktop during streams.", paint(BOLD, &device))
+            } else {
+                format!("{} goes into the game when a stream runs it on its own screen.", paint(BOLD, &device))
+            });
         }
         Cmd::Detach { busid, relay } => {
             call(Request::Detach { relay, busid: busid.clone() })?;

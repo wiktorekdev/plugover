@@ -88,6 +88,9 @@ pub fn parse(json: &str) -> Result<Vec<Device>> {
                     num_configs: 0,
                     manufacturer: None,
                     product: Some(description),
+                    // `USB\VID_046D&PID_C24F\<serial>`; Windows makes up one with `&` in it when
+                    // the device has none.
+                    serial: e.instance_id.rsplit('\\').next().filter(|s| !s.contains('&')).and_then(crate::sysfs::real_serial),
                     driver: None,
                     interfaces,
                     busid,
@@ -204,6 +207,8 @@ mod tests {
         assert_eq!((devs[0].dev.busid.as_str(), devs[0].dev.vid, devs[0].dev.pid), ("1-2", 0x046d, 0xc24f));
         assert!(!devs[0].attached && !devs[0].bound);
         assert!(devs[1].attached && devs[1].bound);
+        assert_eq!(devs[0].dev.serial, None, "Windows made its instance id up: no serial number");
+        assert_eq!(devs[1].dev.serial.as_deref(), Some("NA8B"));
         assert_eq!(crate::catalog::blocked_reason(&devs[1].dev), Some("storage device"));
         // "G HUB" is Logitech's software, not a USB hub; only a hub's own name should match.
         assert_eq!(crate::catalog::blocked_reason(&devs[0].dev), None);

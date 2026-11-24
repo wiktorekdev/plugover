@@ -113,7 +113,7 @@ export function App() {
 					</Card>
 				)}
 				{status.relays.map((r) => (
-					<RelayView key={r.id} relay={r} hostVersion={status.version} session={status.session} watching={status.watching} bluetooth={status.bluetooth} refresh={refresh} />
+					<RelayView key={r.id} relay={r} hostVersion={status.version} session={status.session} watching={status.watching} bluetooth={status.bluetooth} screens={status.screens} refresh={refresh} />
 				))}
 				{/* Close under the last relay rather than a whole section gap away. */}
 				<div className="-mt-7">
@@ -350,8 +350,9 @@ function RelayView({
 	session,
 	watching,
 	bluetooth,
+	screens,
 	refresh,
-}: { relay: Relay; hostVersion?: string; session: boolean; watching: boolean; bluetooth: boolean; refresh: () => Promise<void> }) {
+}: { relay: Relay; hostVersion?: string; session: boolean; watching: boolean; bluetooth: boolean; screens: boolean; refresh: () => Promise<void> }) {
 	// Hubs, storage, network adapters and what the relay does not share are left out. Game devices
 	// come first, in a fixed order, so rows do not jump around when they are turned on or off.
 	const devices = relay.devices.filter((d) => !d.blocked).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.title.localeCompare(b.title));
@@ -483,7 +484,7 @@ function RelayView({
 			<div className="flex flex-col gap-2">
 				<Card padding={false}>
 					{devices.map((d) => (
-						<DeviceRow key={d.busid} relay={relay} device={d} twins={twins(d)} session={session} watching={watching} refresh={refresh} />
+						<DeviceRow key={d.busid} relay={relay} device={d} twins={twins(d)} session={session} watching={watching} screens={screens} refresh={refresh} />
 					))}
 					{missing.map((m) => (
 						<MissingRow key={`${m.id}-${m.port ?? ""}`} relay={relay} device={m} refresh={refresh} />
@@ -600,8 +601,9 @@ function DeviceRow({
 	twins,
 	session,
 	watching,
+	screens,
 	refresh,
-}: { relay: Relay; device: Device; twins: boolean; session: boolean; watching: boolean; refresh: () => Promise<void> }) {
+}: { relay: Relay; device: Device; twins: boolean; session: boolean; watching: boolean; screens: boolean; refresh: () => Promise<void> }) {
 	const [open, setOpen] = useState(false);
 	/** What the switch is doing right now, which can take a few seconds during a stream. */
 	const [busy, setBusy] = useState<string>();
@@ -633,6 +635,8 @@ function DeviceRow({
 						{here && <Badge size="sm">Connected</Badge>}
 					</div>
 					{d.error && !busy && <p className="mt-1 break-words text-sm text-destructive">Could not connect: {d.error}</p>}
+					{d.routed && <p className="mt-1 text-sm text-muted-foreground">Keyboard and mouse go into the stream's own screen ({d.routed})</p>}
+					{d.route_error && <p className="mt-1 break-words text-sm text-destructive">The game's screen does not get its keyboard or mouse: {d.route_error}</p>}
 				</div>
 				{d.state === "elsewhere" && d.lent_to !== "another USB/IP client" && (
 					<Button
@@ -687,6 +691,33 @@ function DeviceRow({
 							<dd className="break-words">
 								{d.history.last_error_at && `${clock(d.history.last_error_at)}: `}
 								{d.history.last_error}
+							</dd>
+						</>
+					)}
+					{screens && (d.kind === "keyboard" || d.kind === "mouse" || d.desktop || d.routed || d.route_error) && (
+						<>
+							<dt className="pt-1.5 text-muted-foreground">During streams</dt>
+							<dd>
+								<Select
+									value={d.desktop ? "desktop" : "game"}
+									disabled={busy !== undefined}
+									onValueChange={(v) =>
+										run(
+											"desktop",
+											{ device: d.id, on: v === "desktop" },
+											v === "desktop" ? `${d.title} stays with this computer` : `${d.title} goes into the game`,
+											"Saving…",
+										)
+									}
+								>
+									<SelectTrigger size="sm" aria-label={`Where ${d.title} types and points during streams`} className="w-64">
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="game">Goes into the game</SelectItem>
+										<SelectItem value="desktop">Stays with this computer</SelectItem>
+									</SelectContent>
+								</Select>
 							</dd>
 						</>
 					)}

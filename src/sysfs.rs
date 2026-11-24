@@ -34,6 +34,8 @@ pub struct UsbDevice {
     pub num_configs: u8,
     pub manufacturer: Option<String>,
     pub product: Option<String>,
+    /// Its serial number, when it has a real one.
+    pub serial: Option<String>,
     pub driver: Option<String>,
     pub interfaces: Vec<Interface>,
 }
@@ -112,9 +114,16 @@ fn read_device(devices: &Path, busid: &str) -> Option<UsbDevice> {
         num_configs: dec(&d, "bNumConfigurations").unwrap_or(0),
         manufacturer: read(&d, "manufacturer"),
         product: read(&d, "product"),
+        serial: read(&d, "serial").and_then(|s| real_serial(&s)),
         driver: driver_name(&d),
         interfaces: ifaces.iter().map(|n| read_interface(&d.join(n))).collect(),
     })
+}
+
+/// A serial number that tells devices apart: many cheap devices report none, zeros or spaces.
+pub fn real_serial(s: &str) -> Option<String> {
+    let s = s.trim();
+    (s.chars().any(|c| c != '0' && c != ' ')).then(|| s.to_string())
 }
 
 fn read_interface(i: &Path) -> Interface {
@@ -203,19 +212,21 @@ fn free_ports<'a>(status: &'a str, hub: &'a str) -> impl Iterator<Item = u32> + 
     })
 }
 
-fn free_port(status: &str, speed: u32) -> Option<u32> {
-    free_ports(status, if speed >= 5 { "ss" } else { "hs" }).next()
-}
-
 /// Plugs the device in and returns the vhci port it landed on.
 #[cfg(unix)]
 pub fn vhci_attach(sys: &Path, fd: RawFd, devid: u32, speed: u32) -> io::Result<u32> {
     let vhci = sys.join(VHCI);
     let status = fs::read_to_string(vhci.join("status"))
         .map_err(|e| io::Error::new(e.kind(), format!("vhci_hcd is not loaded ({e}); run `modprobe vhci-hcd`")))?;
-    let port = free_port(&status, speed).ok_or_else(|| io::Error::other("every vhci port is in use"))?;
-    write(&vhci.join("attach"), &format!("{port} {fd} {devid} {speed}"))?;
-    Ok(port)
+    // punktfunk plugs its own virtual pads into vhci too, often at the same stream start: a port
+    // it took since `status` was read refuses with EBUSY, and the next free one is tried.
+    for port in free_ports(&status, if speed >= 5 { "ss" } else { "hs" }) {
+        match write(&vhci.join("attach"), &format!("{port} {fd} {devid} {speed}")) {
+            Err(e) if e.kind() == io::ErrorKind::ResourceBusy => continue,
+            r => return r.map(|()| port),
+        }
+    }
+    Err(io::Error::other("every vhci port is in use"))
 }
 
 /// False once the kernel has dropped the device (relay gone, cable pulled).
@@ -224,6 +235,16 @@ pub fn vhci_port_used(sys: &Path, port: u32) -> bool {
     status.lines().skip(1).any(|l| {
         let f: Vec<&str> = l.split_whitespace().collect();
         f.len() >= 3 && f[1].parse() == Ok(port) && f[2].parse() != Ok(VDEV_ST_NULL)
+    })
+}
+
+/// The busid the device on vhci `port` has here (`3-1`), under which its interfaces and input
+/// nodes appear in sysfs.
+pub fn vhci_local_busid(sys: &Path, port: u32) -> Option<String> {
+    let status = fs::read_to_string(sys.join(VHCI).join("status")).ok()?;
+    status.lines().skip(1).find_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        (f.len() >= 7 && f[1].parse() == Ok(port) && f[2].parse() != Ok(VDEV_ST_NULL) && f[6] != "0-0").then(|| f[6].to_string())
     })
 }
 
@@ -319,6 +340,7 @@ mod tests {
             ("idProduct", "c24f"),
             ("bDeviceClass", "00"),
             ("product", "G29 Driving Force Racing Wheel\n"),
+            ("serial", "000000000000\n"),
         ] {
             fs::write(dev.join(f), v).unwrap();
         }
@@ -335,6 +357,8 @@ mod tests {
         let d = &devs[0];
         assert_eq!((d.busid.as_str(), d.vid, d.pid, d.speed, d.devnum), ("1-2", 0x046d, 0xc24f, 2, 5));
         assert_eq!(d.product.as_deref(), Some("G29 Driving Force Racing Wheel"));
+        assert_eq!(d.serial, None, "zeros are no serial number");
+        assert_eq!(real_serial(" A00SA5292S0K9Z\n").as_deref(), Some("A00SA5292S0K9Z"));
         assert_eq!(d.interfaces[0].class, 3);
         assert_eq!(d.interfaces[0].hid.as_deref(), Some(&[0x05, 0x01][..]));
         fs::remove_dir_all(sys).unwrap();
@@ -361,9 +385,9 @@ mod tests {
                       hs  0000 006 002 00010005 000003 1-2\n\
                       hs  0001 004 000 00000000 000000 0-0\n\
                       ss  0008 004 000 00000000 000000 0-0\n";
-        assert_eq!(free_port(status, 2), Some(1));
-        assert_eq!(free_port(status, 5), Some(8));
-        assert_eq!(free_port("hub port sta\nhs  0000 006\n", 3), None);
+        assert_eq!(free_ports(status, "hs").next(), Some(1));
+        assert_eq!(free_ports(status, "ss").next(), Some(8));
+        assert_eq!(free_ports("hub port sta\nhs  0000 006\n", "hs").next(), None);
         let sys = std::env::temp_dir().join(format!("plugover-vhci-{}", std::process::id()));
         fs::create_dir_all(sys.join(VHCI)).unwrap();
         fs::write(sys.join(VHCI).join("status"), status).unwrap();

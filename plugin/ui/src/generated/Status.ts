@@ -23,6 +23,11 @@ watching: boolean,
  */
 bluetooth: boolean, 
 /**
+ * This host passes keyboards and mice into a stream's own screen (Linux hosts, gamescope).
+ * Elsewhere they always reach the game, so there is nothing to choose.
+ */
+screens: boolean, 
+/**
  * A newer Plugover release, once the daemon has seen one.
  */
 update?: string | null, relays: Array<RelayStatus>, };

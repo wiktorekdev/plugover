@@ -124,6 +124,15 @@ fn check_host(endpoint: &Path) -> bool {
         } else {
             warn("Bluetooth devices", "a relay's Bluetooth devices cannot connect: /dev/uhid is not writable for you", Some(&format!("{} adds a udev rule", cmd("plugover setup --host"))));
         }
+        if crate::setup::input_readable() {
+            ok("Keyboards and mice", "can go into a stream's own screen (gamescope) while it runs");
+        } else {
+            warn(
+                "Keyboards and mice",
+                "stay with the desktop when a stream runs the game on its own screen (gamescope)",
+                Some(&format!("{} adds a udev rule", cmd("plugover setup --host"))),
+            );
+        }
         if crate::sysfs::vhci_writable(sys) {
             ok("Plugging devices in", "allowed for this user");
         } else {

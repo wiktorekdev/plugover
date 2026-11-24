@@ -1,7 +1,7 @@
 //! The host daemon: keeps a live view of every paired relay, plugs the devices you chose in
 //! while a stream runs (and again after a dropout), and answers the punktfunk plugin and the
-//! CLI with one JSON object per line: over a socket file on Linux, over loopback TCP with a token
-//! on Windows.
+//! CLI with one JSON object per line: over a socket file on Linux; on Windows over loopback TCP
+//! with a token for the CLI and a named pipe for the plugin.
 
 use crate::{
     api, catalog, discovery, host,
@@ -67,6 +67,9 @@ pub enum Request {
         #[serde(default)]
         kind: Option<catalog::Kind>,
     },
+    /// Keep the keyboard and mouse of `device` (vendor:product) with this computer's desktop when
+    /// a stream runs the game on a screen of its own, or let them go there again.
+    Desktop { device: String, on: bool },
     /// Plug a device in now; with `take`, first take it over from the host that has it.
     Attach {
         relay: Option<String>,
@@ -126,6 +129,8 @@ fn wanted(rules: &[AutoRule], relay: &str, d: &proto::DeviceInfo, track: Option<
 struct Track {
     /// vendor:product it had when it was last plugged in here.
     id: String,
+    /// Its serial number then, if it has one.
+    serial: Option<String>,
     /// When it last vanished while plugged in.
     dropped: Option<Instant>,
     /// It was plugged in to stay outside streams too; a device that follows it does as well.
@@ -135,10 +140,14 @@ struct Track {
 
 impl Track {
     /// Wheels such as the G29 come back with another product id when their driver switches
-    /// them to another mode; a device that vanished and is back on its port is followed.
-    // ponytail: same maker on the same port within FOLLOW; a USB serial number would be surer.
+    /// them to another mode; a device that vanished and is back on its port is followed. A serial
+    /// number, when both have one, decides; without, the same maker on the same port does.
     fn follows(&self, d: &proto::DeviceInfo) -> bool {
-        self.dropped.is_some_and(|at| at.elapsed() < FOLLOW) && self.id != d.id && self.id.get(..4) == d.id.get(..4)
+        let same = match (&self.serial, &d.serial) {
+            (Some(was), Some(is)) => was == is,
+            _ => self.id.get(..4) == d.id.get(..4),
+        };
+        self.dropped.is_some_and(|at| at.elapsed() < FOLLOW) && self.id != d.id && same
     }
 }
 
@@ -175,6 +184,15 @@ pub struct Daemon {
     pub ui: crate::ui::Gate,
     /// Some lease holds, as last applied.
     session: AtomicBool,
+    /// Keyboard and mouse nodes passed into a stream's own screen, by node.
+    #[cfg(target_os = "linux")]
+    routes: Mutex<HashMap<PathBuf, (Slot, crate::route::Forward)>>,
+    /// Why passing a node on failed, and when, while it keeps failing.
+    #[cfg(target_os = "linux")]
+    unrouted: Mutex<HashMap<PathBuf, (Slot, String, Instant)>>,
+    /// Where gamescope puts its sockets.
+    #[cfg(target_os = "linux")]
+    runtime: PathBuf,
     reconciling: Mutex<()>,
 }
 
@@ -204,6 +222,12 @@ impl Daemon {
             update: Mutex::default(),
             ui: crate::ui::Gate::new(),
             session: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            routes: Mutex::default(),
+            #[cfg(target_os = "linux")]
+            unrouted: Mutex::default(),
+            #[cfg(target_os = "linux")]
+            runtime: crate::route::runtime_dir(),
             reconciling: Mutex::default(),
         }))
     }
@@ -376,7 +400,7 @@ impl Daemon {
 
     /// Notes that the device on `slot` is plugged in here as `id`, to stay outside streams too
     /// with `always`.
-    fn plugged(&self, slot: &Slot, id: &str, always: bool) {
+    fn plugged(&self, slot: &Slot, id: &str, serial: Option<String>, always: bool) {
         let mut tracks = self.tracks.lock().unwrap();
         let t = tracks.entry(slot.clone()).or_default();
         // An id not known yet (the relay's list lags a device that just came back) keeps the old one.
@@ -385,6 +409,7 @@ impl Daemon {
                 eprintln!("{} came back as {id}; following it", slot.1);
             }
             t.id = id.to_string();
+            t.serial = serial;
         }
         (t.dropped, t.always) = (None, always);
     }
@@ -456,7 +481,7 @@ impl Daemon {
         if !unwanted.is_empty() {
             self.unplug(|slot| unwanted.contains(slot));
         }
-        let todo: Vec<(PairedRelay, String, String, bool)> = {
+        let todo: Vec<(PairedRelay, String, String, Option<String>, bool)> = {
             let (cfg, live) = (self.cfg.lock().unwrap(), self.live.lock().unwrap());
             let (attached, held, failed) = (self.attached.lock().unwrap(), self.held.lock().unwrap(), self.failed.lock().unwrap());
             let tracks = self.tracks.lock().unwrap();
@@ -477,18 +502,18 @@ impl Daemon {
                         })
                         .filter_map(|d| {
                             let always = wanted(&cfg.auto, &relay.id, d, tracks.get(&(relay.id.clone(), d.busid.clone())), session, watching)?;
-                            Some((relay.clone(), d.busid.clone(), d.id.clone(), always))
+                            Some((relay.clone(), d.busid.clone(), d.id.clone(), d.serial.clone(), always))
                         })
                         .collect::<Vec<_>>()
                 })
                 .collect()
         };
-        for (relay, busid, id, always) in todo {
+        for (relay, busid, id, serial, always) in todo {
             let slot = (relay.id.clone(), busid);
             match self.encryption(&relay).and_then(|encrypt| vhci::attach(&self.sys, &relay, &slot.1, encrypt)) {
                 Ok(a) => {
                     eprintln!("plugged in {} from {} (port {})", slot.1, relay.name, a.port);
-                    self.plugged(&slot, &id, always);
+                    self.plugged(&slot, &id, serial, always);
                     self.manual.lock().unwrap().remove(&slot);
                     self.failed.lock().unwrap().remove(&slot);
                     self.attached.lock().unwrap().insert(slot, a);
@@ -506,6 +531,74 @@ impl Daemon {
                     failed.insert(slot, (why, Instant::now()));
                 }
             }
+        }
+        #[cfg(target_os = "linux")]
+        self.route();
+    }
+
+    /// While a stream runs and a gamescope is up, passes the keyboards and mice plugged in here
+    /// into it (see `route`); otherwise leaves them to the desktop. The caller holds `reconciling`.
+    #[cfg(target_os = "linux")]
+    fn route(&self) {
+        use crate::route;
+        let screens = if self.session.load(Ordering::SeqCst) { route::screens(&self.runtime) } else { Vec::new() };
+        let wanted: Vec<(PathBuf, Slot, route::Kind)> = if screens.is_empty() {
+            Vec::new()
+        } else {
+            let (cfg, live, attached) = (self.cfg.lock().unwrap(), self.live.lock().unwrap(), self.attached.lock().unwrap());
+            let stays = |(relay, busid): &Slot| {
+                live.get(relay).and_then(|s| s.devices.iter().find(|d| d.busid == *busid)).is_some_and(|d| cfg.desktop.contains(&d.id))
+            };
+            attached
+                .iter()
+                .filter(|(slot, _)| !stays(slot))
+                .flat_map(|(slot, a)| route::nodes(&self.sys, &slot.1, a.port).into_iter().map(|(node, kind)| (node, slot.clone(), kind)))
+                .collect()
+        };
+        let (mut routes, mut unrouted) = (self.routes.lock().unwrap(), self.unrouted.lock().unwrap());
+        let ended: Vec<PathBuf> =
+            routes.iter().filter(|(node, (_, f))| f.finished() || !wanted.iter().any(|w| w.0 == **node)).map(|(node, _)| node.clone()).collect();
+        for node in ended {
+            let Some((slot, f)) = routes.remove(&node) else { continue };
+            let (by_itself, into) = (f.finished(), f.screen());
+            let why = f.stop();
+            match (by_itself, why) {
+                (true, Some(why)) => {
+                    if unrouted.get(&node).is_none_or(|(_, old, _)| *old != why) {
+                        eprintln!("could not pass {} ({}) into the stream: {why}", slot.1, node.display());
+                    }
+                    unrouted.insert(node, (slot, why, Instant::now()));
+                }
+                // Unplugged, or the stream is over.
+                _ if into.is_some() => eprintln!("{} ({}) is back with the desktop", slot.1, node.display()),
+                _ => {}
+            }
+        }
+        unrouted.retain(|node, _| wanted.iter().any(|w| w.0 == *node));
+        for (node, slot, kind) in wanted {
+            if routes.contains_key(&node) || unrouted.get(&node).is_some_and(|(_, _, at)| at.elapsed() < RETRY) {
+                continue;
+            }
+            if !unrouted.contains_key(&node) {
+                eprintln!("passing {} ({}) into the stream's own screen", slot.1, node.display());
+            }
+            routes.insert(node.clone(), (slot, route::Forward::start(node, kind, screens.clone())));
+        }
+    }
+
+    /// Where the keyboard or mouse of the device on `slot` goes while a stream runs on its own
+    /// screen, and why it cannot, if it cannot.
+    fn routing(&self, slot: &Slot) -> (Option<String>, Option<String>) {
+        #[cfg(target_os = "linux")]
+        {
+            let into = self.routes.lock().unwrap().values().filter(|(s, _)| s == slot).find_map(|(_, f)| f.screen());
+            let why = self.unrouted.lock().unwrap().values().find(|(s, _, _)| s == slot).map(|(_, why, _)| why.clone());
+            (into, why)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = slot;
+            (None, None)
         }
     }
 
@@ -712,6 +805,22 @@ impl Daemon {
                 self.save(&cfg)?;
                 json!({ "ok": true })
             }
+            Request::Desktop { device, on } => {
+                anyhow::ensure!(
+                    cfg!(target_os = "linux"),
+                    "only Linux hosts pass keyboards and mice into a stream's own screen; here they always reach the game"
+                );
+                let device = state::device_id(&device)?;
+                let mut cfg = self.cfg.lock().unwrap();
+                cfg.desktop.retain(|d| *d != device);
+                if on {
+                    cfg.desktop.push(device);
+                }
+                self.save(&cfg)?;
+                drop(cfg);
+                self.reconcile();
+                json!({ "ok": true })
+            }
             Request::Attach { relay, busid, take } => {
                 let relay = self.pick(relay.as_deref())?;
                 if take {
@@ -721,8 +830,9 @@ impl Daemon {
                 let a = vhci::attach(&self.sys, &relay, &busid, self.encryption(&relay)?)?;
                 let port = a.port;
                 let slot = (relay.id.clone(), busid);
-                let id = self.live.lock().unwrap().get(&relay.id).and_then(|s| s.devices.iter().find(|d| d.busid == slot.1).map(|d| d.id.clone()));
-                self.plugged(&slot, &id.unwrap_or_default(), false);
+                let dev = self.live.lock().unwrap().get(&relay.id).and_then(|s| s.devices.iter().find(|d| d.busid == slot.1).map(|d| (d.id.clone(), d.serial.clone())));
+                let (id, serial) = dev.unwrap_or_default();
+                self.plugged(&slot, &id, serial, false);
                 self.held.lock().unwrap().remove(&slot);
                 self.attached.lock().unwrap().insert(slot.clone(), a);
                 self.manual.lock().unwrap().insert(slot);
@@ -794,7 +904,11 @@ impl Daemon {
                     let matched: Vec<&&AutoRule> = rules.iter().filter(|a| a.matches(&r.id, d)).collect();
                     let mut info = d.clone();
                     state::Label::apply(&cfg.label, &d.id, &mut info.identity);
+                    let (routed, route_error) = if attached.contains_key(&slot) { self.routing(&slot) } else { (None, None) };
                     api::DeviceStatus {
+                        routed,
+                        route_error,
+                        desktop: cfg.desktop.contains(&d.id),
                         info,
                         state: if here { api::DeviceState::Here } else if d.lent_to.is_some() { api::DeviceState::Elsewhere } else { api::DeviceState::Free },
                         auto: !matched.is_empty(),
@@ -838,7 +952,7 @@ impl Daemon {
                 }
             })
             .collect();
-        api::Status { host: self.name.clone(), version: proto::VERSION.into(), session: self.session.load(Ordering::SeqCst), sessions, watching, bluetooth: cfg!(target_os = "linux"), update: self.update.lock().unwrap().clone(), relays }
+        api::Status { host: self.name.clone(), version: proto::VERSION.into(), session: self.session.load(Ordering::SeqCst), sessions, watching, bluetooth: cfg!(target_os = "linux"), screens: cfg!(target_os = "linux"), update: self.update.lock().unwrap().clone(), relays }
     }
 
     fn answer<S: Read + Write>(me: &Arc<Self>, read: S, mut write: S, token: Option<&str>) {
@@ -885,6 +999,13 @@ impl Daemon {
             fs::create_dir_all(dir)?;
         }
         fs::write(endpoint, &token).with_context(|| format!("writing {}", endpoint.display()))?;
+        let me = self.clone();
+        thread::spawn(move || {
+            pipe::serve(PIPE, move |conn| {
+                Self::answer(&me, conn.try_clone()?, conn, None);
+                Ok(())
+            })
+        });
         let listener = TcpListener::bind(("127.0.0.1", API_PORT)).with_context(|| format!("listening on 127.0.0.1:{API_PORT}"))?;
         eprintln!("host daemon listening on 127.0.0.1:{API_PORT}");
         for conn in listener.incoming() {
@@ -903,6 +1024,68 @@ impl Daemon {
 /// Loopback port of the Windows daemon.
 #[cfg(windows)]
 pub const API_PORT: u16 = 7276;
+
+/// The punktfunk plugin's way in on Windows. Its AppContainer may not dial loopback or read the
+/// token file, so the pipe's DACL is the credential and a connection needs no token.
+#[cfg(windows)]
+const PIPE: &str = r"\\.\pipe\plugover-host";
+
+#[cfg(windows)]
+mod pipe {
+    use std::{fs::File, io, os::windows::io::FromRawHandle, ptr, thread, time::Duration};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE},
+        Security::{Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES},
+        Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX},
+        System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT},
+    };
+
+    /// The AppContainer package of punktfunk's `plugover` plugin, `punktfunk.plugin.plugover`:
+    /// SHA-256 of the name, as DeriveAppContainerSidFromAppContainerName does it.
+    pub const PLUGIN_PACKAGE: &str = "S-1-15-2-3093401335-3438397477-857312563-170376724-2049339860-2358065718-3618005222";
+
+    /// SYSTEM and Administrators in full; LOCAL SERVICE, the account punktfunk runs plugins
+    /// under, and the plugin's package may read and write. A container's open is checked
+    /// against both of the last, as punktfunk's own plugin pipe is.
+    pub fn sddl() -> String {
+        format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFW;;;LS)(A;;FRFW;;;{PLUGIN_PACKAGE})")
+    }
+
+    /// Accept connections on `name` forever, each handed to `answer` on its own thread.
+    pub fn serve(name: &str, answer: impl Fn(File) -> io::Result<()> + Clone + Send + 'static) {
+        let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let sddl: Vec<u16> = sddl().encode_utf16().chain([0]).collect();
+        let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `sddl` is NUL-terminated. `sd` is never freed: every instance is made from it.
+        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut sd, ptr::null_mut()) } == 0 {
+            eprintln!("the punktfunk plugin's pipe is not served: {}", io::Error::last_os_error());
+            return;
+        }
+        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd, bInheritHandle: 0 };
+        let mut first = true;
+        loop {
+            // The first instance claims the name, so nobody else can serve it to the plugin.
+            let flags = PIPE_ACCESS_DUPLEX | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 };
+            // SAFETY: `name` is NUL-terminated and `sa` outlives the call, which copies it.
+            let h = unsafe { CreateNamedPipeW(name.as_ptr(), flags, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, &sa) };
+            if h == INVALID_HANDLE_VALUE {
+                eprintln!("the punktfunk plugin's pipe: {}; trying again", io::Error::last_os_error());
+                thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+            first = false;
+            // SAFETY: `h` is a pipe instance this loop owns.
+            if unsafe { ConnectNamedPipe(h, ptr::null_mut()) } == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
+                unsafe { CloseHandle(h) };
+                continue;
+            }
+            // SAFETY: the handle is ours alone; the File closes it.
+            let conn = unsafe { File::from_raw_handle(h) };
+            let answer = answer.clone();
+            thread::spawn(move || answer(conn));
+        }
+    }
+}
 
 /// A browser can be tricked into sending lines to a loopback port, but it cannot read the token
 /// file, so on Windows every request must carry the token.
@@ -966,6 +1149,38 @@ mod tests {
         assert!(parse("POST / HTTP/1.1", Some("t")).is_err());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn the_plugin_pipe_answers_and_names_the_plugins_package() {
+        use sha2::{Digest, Sha256};
+        use std::io::BufRead;
+        let name: Vec<u8> = "punktfunk.plugin.plugover".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let hash = Sha256::digest(&name);
+        let rids: Vec<String> = hash[..28].as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c).to_string()).collect();
+        assert_eq!(pipe::PLUGIN_PACKAGE, format!("S-1-15-2-{}", rids.join("-")));
+
+        let name = r"\\.\pipe\plugover-test";
+        thread::spawn(move || {
+            pipe::serve(name, |conn| {
+                let mut line = String::new();
+                BufReader::new(conn.try_clone()?).read_line(&mut line)?;
+                (&conn).write_all(line.to_uppercase().as_bytes())
+            })
+        });
+        for _ in 0..2 {
+            let mut conn = loop {
+                match fs::OpenOptions::new().read(true).write(true).open(name) {
+                    Ok(c) => break c,
+                    Err(_) => thread::sleep(Duration::from_millis(50)),
+                }
+            };
+            conn.write_all(b"hi\n").unwrap();
+            let mut back = String::new();
+            BufReader::new(conn).read_line(&mut back).unwrap();
+            assert_eq!(back, "HI\n");
+        }
+    }
+
     #[test]
     fn a_stream_runs_while_any_source_holds_a_lease() {
         // What the punktfunk plugin of 0.6 sends: no source, so it is punktfunk's lease.
@@ -1011,6 +1226,7 @@ mod tests {
                 blocked: None,
             },
             lent_to: None,
+            serial: None,
         }
     }
 
@@ -1032,7 +1248,7 @@ mod tests {
         assert_eq!(wanted(&[], "r", &d, None, true, true), None, "no rule, nothing to follow");
 
         // The G29 comes back as another product; it keeps the mode it was plugged in with.
-        let track = |always| Track { id: "046d:c294".into(), dropped: Some(Instant::now()), always, history: api::History::default() };
+        let track = |always| Track { id: "046d:c294".into(), serial: None, dropped: Some(Instant::now()), always, history: api::History::default() };
         assert_eq!(wanted(&[], "r", &d, Some(&track(true)), false, true), Some(true));
         assert_eq!(wanted(&[], "r", &d, Some(&track(false)), false, true), None);
         assert_eq!(wanted(&[], "r", &d, Some(&track(false)), true, true), Some(false));
@@ -1082,6 +1298,64 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keyboards_go_into_a_streams_own_screen_only_during_it() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+        let root = std::env::temp_dir().join(format!("plugover-hostd-route-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (sys, runtime) = (root.join("sys"), root.join("run"));
+        let vhci = sys.join("devices/platform/vhci_hcd.0");
+        fs::create_dir_all(&vhci).unwrap();
+        fs::write(vhci.join("status"), "hub port sta spd dev      sockfd local_busid\nhs  0003 006 002 00030002 000003 3-1\n").unwrap();
+        // A keyboard node that sysfs lists but /dev/input does not have, so passing it on fails.
+        let input = vhci.join("usb3/3-1/3-1:1.0/0003:046D:C31C.0001/input/input9999");
+        fs::create_dir_all(input.join("capabilities")).unwrap();
+        fs::write(input.join("capabilities/key"), "fffffffffffffffe").unwrap();
+        fs::create_dir_all(sys.join("class/input")).unwrap();
+        symlink(&input, sys.join("class/input/event9999")).unwrap();
+        symlink(&input, input.join("device")).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        let _screen = UnixListener::bind(runtime.join("gamescope-0-ei")).unwrap();
+
+        let mut d = Daemon::open(sys, root.join("host.toml")).unwrap();
+        Arc::get_mut(&mut d).unwrap().runtime = runtime;
+        let relay = PairedRelay { id: "r".into(), name: "rig".into(), address: "127.0.0.1:1".into(), host_id: "00".repeat(8), key: "00".repeat(32), encrypts: true, unencrypted: false };
+        d.cfg.lock().unwrap().relay.push(relay);
+        let mut kbd = device("1-2", "046d:c31c");
+        kbd.identity.kind = catalog::Kind::Keyboard;
+        d.live.lock().unwrap().insert("r".into(), Snapshot { relay_id: "r".into(), relay: "rig".into(), devices: vec![kbd], version: proto::VERSION.into(), encrypted: true });
+        d.attached.lock().unwrap().insert(("r".into(), "1-2".into()), vhci::Attachment { port: 3, hid: None });
+        let status = || d.status().relays[0].devices[0].clone();
+
+        d.route();
+        assert!(d.routes.lock().unwrap().is_empty(), "no stream: the desktop keeps it");
+        d.set_session("punktfunk", true, None);
+        d.route();
+        assert_eq!(d.routes.lock().unwrap().keys().collect::<Vec<_>>(), [Path::new("/dev/input/event9999")]);
+        while !d.routes.lock().unwrap().values().all(|(_, f)| f.finished()) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        d.route();
+        let st = status();
+        assert!(st.routed.is_none());
+        assert!(st.route_error.as_deref().is_some_and(|e| e.contains("cannot read /dev/input/event9999")), "{:?}", st.route_error);
+        d.route();
+        assert!(d.routes.lock().unwrap().is_empty(), "a failed node waits before it is tried again");
+
+        // Kept with the desktop: not passed on, and no problem to show.
+        d.handle(Request::Desktop { device: "046d:c31c".into(), on: true }).unwrap();
+        let st = status();
+        assert!(st.desktop && st.route_error.is_none() && d.routes.lock().unwrap().is_empty());
+        d.handle(Request::Desktop { device: "046d:c31c".into(), on: false }).unwrap();
+        assert!(!status().desktop && d.cfg.lock().unwrap().desktop.is_empty());
+
+        d.set_session("punktfunk", false, None);
+        d.route();
+        assert!(status().route_error.is_none(), "the stream is over, and with it the problem");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn unencrypted_only_when_allowed_and_the_relay_cannot_encrypt() {
         let root = std::env::temp_dir().join(format!("plugover-hostd-crypt-{}", std::process::id()));
@@ -1113,10 +1387,18 @@ mod tests {
     #[test]
     fn a_device_that_comes_back_with_another_id_is_followed() {
         let dev = |id: &str| device("1-2", id);
-        let mut t = Track { id: "046d:c294".into(), dropped: Some(Instant::now()), always: false, history: api::History::default() };
+        let mut t = Track { id: "046d:c294".into(), serial: None, dropped: Some(Instant::now()), always: false, history: api::History::default() };
         assert!(t.follows(&dev("046d:c24f")), "same maker, new mode");
         assert!(!t.follows(&dev("045e:028e")), "another maker is another device");
         assert!(!t.follows(&dev("046d:c294")), "the same id is plugged in by its rule, if any");
+
+        // With serial numbers on both sides, they decide.
+        let with = |id: &str, serial: &str| proto::DeviceInfo { serial: Some(serial.into()), ..dev(id) };
+        t.serial = Some("A00SA5292S0K9Z".into());
+        assert!(t.follows(&with("046d:c24f", "A00SA5292S0K9Z")));
+        assert!(!t.follows(&with("046d:c24f", "B11")), "another wheel of the same maker, plugged in there meanwhile");
+        assert!(t.follows(&with("0eb7:0e04", "A00SA5292S0K9Z")), "the same device under another maker's id");
+        assert!(t.follows(&dev("046d:c24f")), "the relay sent no serial: as before");
         t.dropped = Some(Instant::now() - FOLLOW);
         assert!(!t.follows(&dev("046d:c24f")), "too long ago");
     }
@@ -1135,9 +1417,9 @@ mod tests {
         d.attached.lock().unwrap().insert(slot.clone(), vhci::Attachment { port: 3, hid: None });
 
         // Plugged in again before the relay's list knows its id: the device keeps the old one.
-        d.plugged(&slot, "054c:09cc", false);
+        d.plugged(&slot, "054c:09cc", None, false);
         d.tracks.lock().unwrap().get_mut(&slot).unwrap().dropped = Some(Instant::now());
-        d.plugged(&slot, "", false);
+        d.plugged(&slot, "", None, false);
         assert_eq!(d.tracks.lock().unwrap()[&slot].id, "054c:09cc");
 
         // No vhci_hcd in this fake sysfs, so every detach fails.

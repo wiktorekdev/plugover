@@ -6,7 +6,7 @@ import { type Punktfunk, definePlugin, servePluginUi } from "@punktfunk/host";
 import pkg from "../package.json" with { type: "json" };
 import { daemon } from "./daemon";
 
-const UI_OPS = new Set(["status", "discover", "pair", "forget", "auto", "label", "attach", "detach", "unencrypted", "bt_scan", "bt_pair", "bt_forget"]);
+const UI_OPS = new Set(["status", "discover", "pair", "forget", "auto", "label", "attach", "detach", "desktop", "unencrypted", "bt_scan", "bt_pair", "bt_forget"]);
 const RESYNC_MS = 10_000;
 
 const json = (body: unknown, status = 200) =>

@@ -22,6 +22,10 @@ pub struct Status {
     /// This host can take a relay's Bluetooth devices (Linux hosts, through uhid).
     #[serde(default)]
     pub bluetooth: bool,
+    /// This host passes keyboards and mice into a stream's own screen (Linux hosts, gamescope).
+    /// Elsewhere they always reach the game, so there is nothing to choose.
+    #[serde(default)]
+    pub screens: bool,
     /// A newer Plugover release, once the daemon has seen one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<String>,
@@ -78,6 +82,16 @@ pub struct DeviceStatus {
     pub error: Option<String>,
     #[serde(default)]
     pub history: History,
+    /// While a stream runs on a screen of its own (a headless gamescope), its keyboard or mouse
+    /// goes there instead of to the desktop: the screen's name.
+    #[serde(default)]
+    pub routed: Option<String>,
+    /// Why its keyboard or mouse cannot be passed into that screen.
+    #[serde(default)]
+    pub route_error: Option<String>,
+    /// Its keyboard and mouse stay with this computer's desktop even then.
+    #[serde(default)]
+    pub desktop: bool,
 }
 
 /// What happened to a device since the host daemon started. Times are Unix seconds.

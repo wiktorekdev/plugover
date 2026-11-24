@@ -155,6 +155,9 @@ pub struct DeviceInfo {
     pub identity: Identity,
     /// Name of the host that has it right now.
     pub lent_to: Option<String>,
+    /// Its USB serial number, when it has a real one; older relays send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
 }
 
 /// Sent by the relay on connect, on every change, and every few seconds as a heartbeat.

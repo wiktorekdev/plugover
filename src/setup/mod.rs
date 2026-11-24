@@ -7,7 +7,7 @@ mod linux;
 #[cfg(not(windows))]
 use linux as os;
 #[cfg(not(windows))]
-pub use linux::console_lacks_plugin;
+pub use linux::{console_lacks_plugin, input_readable};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]

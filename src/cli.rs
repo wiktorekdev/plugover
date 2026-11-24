@@ -180,6 +180,15 @@ fn print_relay(r: &RelayStatus, ours: &str) {
         if let Some(why) = &d.error {
             println!("    {} could not connect: {why}", paint(BAD, "✗"));
         }
+        if d.desktop && d.state == DeviceState::Here {
+            println!("    {} its keyboard or mouse stays with this computer's desktop during streams", paint(DIM, "→"));
+        }
+        if let Some(screen) = &d.routed {
+            println!("    {} its keyboard or mouse goes into the stream's own screen ({screen})", paint(DIM, "→"));
+        }
+        if let Some(why) = &d.route_error {
+            println!("    {} the game's screen does not get its keyboard or mouse: {why}", paint(WARN, "!"));
+        }
     }
     for (m, title) in r.missing.iter().zip(&titles[shown.len()..]) {
         println!(

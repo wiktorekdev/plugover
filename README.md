@@ -77,6 +77,19 @@ always), **always**, or **only during streams**.
 Installed punktfunk or Sunshine after Plugover? Run `plugover setup --host` again; `plugover doctor`
 tells you when.
 
+### Games on a screen of their own
+
+Some streams run the game in its own headless gamescope (punktfunk's dedicated game session, or a
+Sunshine app started in gamescope). That gamescope reads no input devices, so a keyboard or mouse
+from the relay would only reach the desktop. While such a stream runs, the Linux host passes their
+keys, clicks, motion and wheel into gamescope instead, and gives them back to the desktop when the
+stream ends. Pads, wheels and joysticks need none of this: games read them directly. On Windows
+the game always gets them, so there this is not needed. Not covered: punktfunk seats, where
+several people play on one box, each as a user of their own.
+
+To keep a keyboard or mouse on this computer's desktop anyway, for someone sitting at the host,
+run `plugover desktop <id> on`, or pick **Stays with this computer** in its details on the page.
+
 ## Bluetooth controllers
 
 Pair a controller with the relay from **Bluetooth devices** in the relay's menu, or with
@@ -100,6 +113,7 @@ plugover auto 046d:c24f on               # use a device (add --mode always|sessi
 plugover attach 1-2 [--take]             # connect one now, taking it from another host if needed
 plugover detach 1-2                      # give it back
 plugover label 0fd9:0080 --name "Stream Deck" --kind other
+plugover desktop 046d:c31c on            # keep a keyboard or mouse on the desktop during streams
 plugover forget simrig                   # remove a relay
 plugover ui                              # the Plugover page in a browser
 ```
@@ -131,7 +145,18 @@ Only what is marked tested has been tried on real hardware.
 | Sunshine on Windows | not tested |
 | Parsec, Steam Remote Play | experimental, not tested with a real stream |
 | Bluetooth, Linux to Linux | **Tested** with DualShock 4 (relay and host on one machine) |
+| Keyboard and mouse into a headless gamescope | **Tested** with punktfunk's gamescope 3.17 and virtual devices; not yet in a real punktfunk stream |
 | Logitech G29 (`046d:c24f`) | **Tested** |
+
+### What suits USB over the network
+
+| Device | Over Plugover |
+|---|---|
+| Wheels, pedals, shifters, pads, flight sticks, button boxes | What it is made for. Force feedback works; it needs a steady link, so use a cable. |
+| Keyboards and mice | Work, also into games on a screen of their own (see above). |
+| USB headsets, microphones, sound cards | Not tested. They send sound in fixed time slots, which a network delays and jitters, so expect crackles, worst over Wi-Fi. Plugging the headset into the device you stream to is the better path: the stream carries the sound. |
+| Webcams | Not tested; they need a lot of steady bandwidth. |
+| Hubs, storage, network adapters | Never shared. |
 
 Tried it on something else? [Send a compatibility report](https://github.com/wiktorekdev/plugover/issues/new?template=compatibility.md).
 
@@ -146,6 +171,7 @@ log (`--relay` for the relay's).
 | "Plugging devices in is not allowed" right after install | Log out and back in once. |
 | Force feedback stutters | Use a cable instead of Wi-Fi; the latency is shown next to the relay. |
 | A wheel stops after switching modes | Turn on its other USB id too. |
+| Keyboard or mouse does nothing in a game on its own screen | Run `plugover setup --host` again (it lets the host read them), then `plugover status` says where they go. |
 
 Still stuck? [Open an issue](https://github.com/wiktorekdev/plugover/issues/new?template=bug_report.md)
 with `plugover doctor --report` from both machines.

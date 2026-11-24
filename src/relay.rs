@@ -500,6 +500,7 @@ impl Relay {
                     identity,
                     // Attached but not by us: WSL or another USB/IP client on Windows.
                     lent_to: lent.get(&d.busid).cloned().or_else(|| attached.then(|| "another USB/IP client".into())),
+                    serial: d.serial.clone(),
                 }
             })
             .collect();
@@ -519,6 +520,8 @@ impl Relay {
                     },
                     busid: d.busid,
                     id,
+                    // The busid is its Bluetooth address already.
+                    serial: None,
                 });
             }
         }

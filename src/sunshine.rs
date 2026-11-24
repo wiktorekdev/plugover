@@ -77,14 +77,13 @@ pub fn port(conf: &str) -> u16 {
     conf.lines().filter_map(setting).find(|(k, _)| *k == "port").and_then(|(_, v)| v.parse().ok()).unwrap_or(DEFAULT_PORT)
 }
 
-/// `name = value` from one config line, if it is one.
+/// `name = value` from one config line, if it is one. As in Sunshine's parser, a `#` anywhere
+/// starts a comment, even inside a value.
 fn setting(line: &str) -> Option<(&str, &str)> {
-    let line = line.trim();
-    if line.starts_with('#') {
-        return None;
-    }
+    let line = line.split('#').next().unwrap_or_default();
     let (k, v) = line.split_once('=')?;
-    Some((k.trim(), v.trim()))
+    let k = k.trim();
+    (!k.is_empty()).then(|| (k, v.trim()))
 }
 
 /// Whether the config has Plugover's hook.
@@ -201,6 +200,8 @@ mod tests {
         assert!(with_entry("global_prep_cmd = not json\n", e()).is_err(), "a list it cannot read is left alone");
         assert!(with_entry("global_prep_cmd = []\nglobal_prep_cmd = []\n", e()).is_err());
         assert_eq!(port("sunshine_name = rig"), 47989);
+        assert_eq!(port("port = 48000  # moved off the default\n"), 48000);
+        assert_eq!(port("# port = 48000\n"), 47989);
     }
 
     #[test]

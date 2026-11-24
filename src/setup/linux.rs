@@ -17,6 +17,9 @@ const FIREWALL_RECORD: &str = "/var/lib/plugover/firewall";
 const OLD_MODULES: &str = "/etc/modules-load.d/plugover.conf";
 /// Lets the logged-in user recreate a relay's Bluetooth devices through /dev/uhid.
 const UHID_RULE: &str = "/etc/udev/rules.d/70-plugover-uhid.rules";
+/// Lets the logged-in user read keyboards and mice from a relay, to pass them into a stream's own
+/// screen (a headless gamescope).
+const INPUT_RULE: &str = "/etc/udev/rules.d/70-plugover-input.rules";
 /// Lets the `plugover` group plug devices in, where punktfunk's rule does not do it for its group.
 const VHCI_RULE: &str = "/etc/udev/rules.d/70-plugover-vhci.rules";
 /// punktfunk-host's packaged rule, which gives the `punktfunk` group vhci-hcd.
@@ -86,6 +89,11 @@ fn host_unit() -> PathBuf {
 
 fn plugin_vendor() -> PathBuf {
     crate::home().join(".config/punktfunk/plugins/vendor")
+}
+
+/// The host daemon may read a relay's keyboards and mice, to pass them into a stream's own screen.
+pub fn input_readable() -> bool {
+    user_in_group("input") || Path::new(INPUT_RULE).exists()
 }
 
 /// punktfunk is here but its console has no Plugover page: it came after Plugover's setup.
@@ -536,9 +544,36 @@ fn plan_host(found: &Found) -> Result<Plan> {
         lines.push(line(Mark::Todo, "Let you use Bluetooth devices from a relay", format!("a udev rule, {UHID_RULE}")));
     }
 
+    // Keyboards and mice from a relay are read here to pass them into a stream's own screen.
+    let input = input_readable();
+    if !input {
+        lines.push(line(Mark::Todo, "Let keyboards and mice reach a stream's own screen", format!("a udev rule, {INPUT_RULE}")));
+    }
+
     let mut steps: Vec<(String, Action)> = Vec::new();
     if !loaded {
         steps.push(("Loading kernel modules".into(), Box::new(|| load_module("vhci-hcd"))));
+    }
+    if !input {
+        steps.push((
+            "Adding the udev rule for keyboards and mice".into(),
+            Box::new(|| {
+                root_write(
+                    INPUT_RULE,
+                    "# Plugover: the logged-in user may read keyboards and mice from a relay, to pass them into a\n\
+                     # stream's own screen (a headless gamescope) while the stream runs.\n\
+                     SUBSYSTEM==\"input\", KERNEL==\"event*\", DEVPATH==\"/devices/platform/vhci_hcd.*\", TAG+=\"uaccess\"\n\
+                     SUBSYSTEM==\"input\", KERNEL==\"event*\", DEVPATH==\"/devices/virtual/misc/uhid/*\", TAG+=\"uaccess\"\n",
+                )?;
+                // Only for what is plugged in from a relay now; later ones get it as they appear.
+                for parent in ["/sys/devices/platform/vhci_hcd.0", "/sys/devices/virtual/misc/uhid"] {
+                    if Path::new(parent).is_dir() {
+                        let _ = root("udevadm", &["trigger", "--subsystem-match=input", &format!("--parent-match={parent}")]);
+                    }
+                }
+                Ok(())
+            }),
+        ));
     }
     if !uhid {
         steps.push((
@@ -595,7 +630,7 @@ fn plan_host(found: &Found) -> Result<Plan> {
         next_steps_host();
         Ok(())
     });
-    Ok(Plan { lines, root: !loaded || join_group || !uhid, steps, after })
+    Ok(Plan { lines, root: !loaded || join_group || !uhid || !input, steps, after })
 }
 
 fn start_host() -> Result<()> {
@@ -651,7 +686,7 @@ fn plan_uninstall(found: &Found, ctx: &Ctx) -> Result<Plan> {
         println!("  {} {}", paint(GOOD.bold(), done), paint(DIM, "The usbip kernel modules stay; they come with your kernel."));
         Ok(())
     });
-    Ok(Plan { lines, steps, root: relay || (host && (Path::new(UHID_RULE).exists() || Path::new(VHCI_RULE).exists())), after })
+    Ok(Plan { lines, steps, root: relay || (host && [UHID_RULE, VHCI_RULE, INPUT_RULE].iter().any(|r| Path::new(r).exists())), after })
 }
 
 fn remove_relay(purge: bool) -> Result<()> {
@@ -678,8 +713,10 @@ fn remove_relay(purge: bool) -> Result<()> {
 
 fn remove_host(purge: bool) -> Result<()> {
     super::unhook_streaming_hosts();
-    if Path::new(UHID_RULE).exists() {
-        root("rm", &["-f", UHID_RULE])?;
+    for rule in [UHID_RULE, INPUT_RULE] {
+        if Path::new(rule).exists() {
+            root("rm", &["-f", rule])?;
+        }
     }
     if Path::new(VHCI_RULE).exists() {
         root("rm", &["-f", VHCI_RULE])?;

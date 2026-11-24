@@ -71,6 +71,10 @@ pub struct HostConfig {
     /// Names and kinds set with `plugover label`, for devices Plugover gets wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label: Vec<Label>,
+    /// Devices (vendor:product) whose keyboard and mouse stay with this computer's desktop when a
+    /// stream runs the game on a screen of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desktop: Vec<String>,
     /// Sources that have reported streams here (punktfunk, a host app's hook). After a restart they
     /// count as watching for a while, so devices in auto mode do not connect before they speak up.
     /// None in a config from before 0.7; see `remembered_sources`.
@@ -264,6 +268,7 @@ mod tests {
             }],
             auto: vec![AutoRule { relay: "ab".into(), device: "046d:c24f".into(), title: Some("Logitech G29".into()), port: None, mode: Mode::Always }],
             label: Vec::new(),
+            desktop: vec!["046d:c31c".into()],
             sources: Some(vec!["punktfunk".into()]),
             watch: [("sunshine".to_string(), 47989)].into(),
         };
@@ -276,7 +281,7 @@ mod tests {
         assert_eq!(cfg.label, [Label { device: "0fd9:0080".into(), name: None, kind: Some(crate::catalog::Kind::Other) }], "a new label replaces the old one; an empty one removes it");
         save(&path, &cfg).unwrap();
         let back: HostConfig = load(&path).unwrap();
-        assert_eq!((back.auto, back.label, back.sources, back.watch), (cfg.auto, cfg.label, cfg.sources, cfg.watch));
+        assert_eq!((back.auto, back.label, back.desktop, back.sources, back.watch), (cfg.auto, cfg.label, cfg.desktop, cfg.sources, cfg.watch));
         let old: HostConfig = toml::from_str("[[auto]]\nrelay = \"ab\"\ndevice = \"046d:c24f\"\n").unwrap();
         let mut old = old;
         assert_eq!(old.auto[0].mode, Mode::Auto, "rules from before 0.7 are in auto mode");
@@ -303,6 +308,7 @@ mod tests {
                 blocked: None,
             },
             lent_to: None,
+            serial: None,
         };
         let mut rules = Vec::new();
         set_auto(&mut rules, rule(None), true);

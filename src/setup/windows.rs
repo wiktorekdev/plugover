@@ -315,14 +315,15 @@ fn install_self() -> Result<()> {
         fs::copy(std::env::current_exe()?, installed_exe()).context("copying plugover.exe into Program Files")?;
     }
     ps(&path_script(true)).context("adding Plugover to PATH")?;
-    // Keys stay readable by SYSTEM and administrators only; the punktfunk plugin runs as LOCAL
-    // SERVICE and may read just the api folder with the host daemon's token.
+    // Keys and the host daemon's token stay readable by SYSTEM and administrators only. The
+    // punktfunk plugin reaches the daemon over its own pipe, so LOCAL SERVICE loses the read on
+    // the api folder that older versions gave it.
     let data = crate::program_data();
     let api = data.join("api");
     fs::create_dir_all(&api)?;
     ps(&format!(
         "icacls {} /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-         icacls {} /grant '*S-1-5-19:(OI)(CI)RX' | Out-Null",
+         icacls {} /remove:g '*S-1-5-19' | Out-Null",
         q(&data),
         q(&api)
     ))

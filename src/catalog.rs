@@ -365,6 +365,7 @@ mod tests {
             num_configs: 1,
             manufacturer: Some("ACME".into()),
             product: Some("Thing".into()),
+            serial: None,
             driver: None,
             interfaces: ifaces,
         }
