@@ -9,6 +9,7 @@ use anstream::{print, println};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::{
+    collections::BTreeMap,
     io::{IsTerminal, Write},
     time::Duration,
 };
@@ -161,6 +162,7 @@ fn print_relay(r: &RelayStatus, ours: &str) {
     for (d, title) in shown.iter().zip(&titles) {
         let (dot, state) = match d.state {
             DeviceState::Here => (paint(GOOD, "●"), paint(GOOD, "connected")),
+            DeviceState::Elsewhere if d.info.reserved => (paint(WARN, "◐"), paint(WARN, format!("reserved for {}", d.info.lent_to.as_deref().unwrap_or("another host")))),
             DeviceState::Elsewhere => (paint(WARN, "◐"), paint(WARN, format!("in use by {}", d.info.lent_to.as_deref().unwrap_or("someone")))),
             DeviceState::Free => (paint(DIM, "○"), paint(DIM, "free")),
         };
@@ -168,7 +170,7 @@ fn print_relay(r: &RelayStatus, ours: &str) {
             (false, ..) => String::new(),
             (true, always, port) => paint(
                 ACCENT,
-                format!("  {}{}", if always { "always connected" } else { "connects with streams" }, if port { ", this port only" } else { "" }),
+                format!("  {}{}", if always { "auto-connect always" } else { "auto-connect during streams" }, if port { ", this port only" } else { "" }),
             ),
         };
         let drops = match d.history.drops {
@@ -203,8 +205,14 @@ fn print_relay(r: &RelayStatus, ours: &str) {
     if r.online && shown.is_empty() && r.missing.is_empty() {
         println!("  {}", paint(DIM, "Nothing to share is plugged in."));
     }
-    if !hidden.is_empty() {
-        println!("  {}", paint(DIM, format!("{} hidden: hubs, storage and devices the relay keeps", hidden.len())));
+    if r.online && !hidden.is_empty() {
+        let mut reasons = BTreeMap::new();
+        for reason in hidden.iter().filter_map(|d| d.info.identity.blocked.as_deref()) {
+            *reasons.entry(reason).or_insert(0) += 1;
+        }
+        let reasons = reasons.into_iter().map(|(reason, count)| format!("{reason} ×{count}")).collect::<Vec<_>>().join(", ");
+        let devices = if hidden.len() == 1 { "device" } else { "devices" };
+        println!("  {}", paint(DIM, format!("{} {devices} excluded ({reasons})", hidden.len())));
     }
 }
 
@@ -282,7 +290,7 @@ pub fn print_hosts(st: &state::RelayState) {
 pub fn print_share(st: &state::RelayState) {
     let me = state::hostname();
     let Some(list) = &st.share else {
-        println!("{} shares every device except hubs and storage.", paint(BOLD, &me));
+        println!("{} shares all eligible devices.", paint(BOLD, &me));
         println!("{} {}", paint(DIM, "To share only some, run"), cmd("plugover share <id> on"));
         return;
     };

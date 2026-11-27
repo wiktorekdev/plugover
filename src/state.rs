@@ -71,6 +71,8 @@ pub struct HostConfig {
     /// Names and kinds set with `plugover label`, for devices Plugover gets wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label: Vec<Label>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub device_name: Vec<DeviceName>,
     /// Devices (vendor:product) whose keyboard and mouse stay with this computer's desktop when a
     /// stream runs the game on a screen of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -92,6 +94,10 @@ impl HostConfig {
     pub fn remembered_sources(&mut self) -> &mut Vec<String> {
         let old_rules = !self.auto.is_empty();
         self.sources.get_or_insert_with(|| if old_rules { vec!["punktfunk".into()] } else { Vec::new() })
+    }
+
+    pub fn model_label(&self, id: &str) -> Option<&Label> {
+        self.label.iter().find(|label| label.device == id)
     }
 }
 
@@ -115,13 +121,41 @@ impl Label {
 
 /// Sets or, with neither a name nor a kind, removes the label of one model.
 pub fn set_label(labels: &mut Vec<Label>, device: String, name: Option<String>, kind: Option<crate::catalog::Kind>) -> Result<()> {
-    let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
-    anyhow::ensure!(name.as_ref().is_none_or(|n| n.chars().count() <= 60), "keep the name under 60 characters");
+    let name = checked_name(name)?;
     labels.retain(|l| l.device != device);
     if name.is_some() || kind.is_some() {
         labels.push(Label { device, name, kind });
     }
     Ok(())
+}
+
+pub fn checked_name(name: Option<String>) -> Result<Option<String>> {
+    let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    anyhow::ensure!(name.as_ref().is_none_or(|n| n.chars().count() <= 60), "keep the name under 60 characters");
+    Ok(name)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceName {
+    pub relay: String,
+    pub device: String,
+    /// For a serial-scoped name, the port the device was on when last named.
+    pub port: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
+    pub name: String,
+}
+
+impl DeviceName {
+    pub fn matches(&self, relay: &str, device: &str, port: &str, serial: Option<&str>) -> bool {
+        self.relay == relay
+            && self.device == device
+            && match (&self.serial, serial) {
+                (Some(saved), Some(seen)) => saved == seen,
+                (None, None) => self.port == port,
+                _ => false,
+            }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,7 +192,11 @@ pub struct AutoRule {
 
 impl AutoRule {
     pub fn matches(&self, relay: &str, device: &crate::proto::DeviceInfo) -> bool {
-        self.relay == relay && self.device == device.id && self.port.as_ref().is_none_or(|p| *p == device.busid)
+        self.matches_port(relay, &device.id, &device.busid)
+    }
+
+    pub fn matches_port(&self, relay: &str, device: &str, busid: &str) -> bool {
+        self.relay == relay && self.device == device && self.port.as_deref().is_none_or(|p| p == busid)
     }
 
     /// Connects outside streams too. `watching`: something here reports streams.
@@ -199,12 +237,18 @@ pub fn device_id(input: &str) -> Result<String> {
     Ok(id)
 }
 
-/// Turns one auto-connect rule on or off. A rule for any port replaces every rule for that model;
-/// a rule for one port replaces the any-port rule and that port's, and keeps other ports' rules.
+/// Turns one auto-connect rule on or off. An any-port operation applies to the whole model.
+/// Enabling one port narrows an any-port rule. Disabling one port removes only its explicit rule.
 pub fn set_auto(rules: &mut Vec<AutoRule>, rule: AutoRule, on: bool) {
     rules.retain(|a| {
-        let same = a.relay == rule.relay && a.device == rule.device;
-        !same || (rule.port.is_some() && a.port.is_some() && a.port != rule.port)
+        if a.relay != rule.relay || a.device != rule.device {
+            return true;
+        }
+        match (&rule.port, &a.port) {
+            (None, _) => false,
+            (Some(_), None) => !on,
+            (Some(port), Some(other)) => port != other,
+        }
     });
     if on {
         rules.push(rule);
@@ -268,6 +312,7 @@ mod tests {
             }],
             auto: vec![AutoRule { relay: "ab".into(), device: "046d:c24f".into(), title: Some("Logitech G29".into()), port: None, mode: Mode::Always }],
             label: Vec::new(),
+            device_name: Vec::new(),
             desktop: vec!["046d:c31c".into()],
             sources: Some(vec!["punktfunk".into()]),
             watch: [("sunshine".to_string(), 47989)].into(),
@@ -285,6 +330,7 @@ mod tests {
         let old: HostConfig = toml::from_str("[[auto]]\nrelay = \"ab\"\ndevice = \"046d:c24f\"\n").unwrap();
         let mut old = old;
         assert_eq!(old.auto[0].mode, Mode::Auto, "rules from before 0.7 are in auto mode");
+        assert!(old.device_name.is_empty());
         assert_eq!(old.remembered_sources(), &["punktfunk"], "and were for punktfunk streams");
         assert!(HostConfig::default().remembered_sources().is_empty());
         assert_eq!(decode_key(&back.relay[0].key).unwrap(), [0u8; 32]);
@@ -308,11 +354,14 @@ mod tests {
                 blocked: None,
             },
             lent_to: None,
+            reserved: false,
             serial: None,
         };
         let mut rules = Vec::new();
         set_auto(&mut rules, rule(None), true);
         assert!(rules[0].matches("r", &dev("1-2")) && rules[0].matches("r", &dev("1-3")), "any port");
+        set_auto(&mut rules, rule(Some("1-2")), false);
+        assert_eq!(rules, [rule(None)], "a disabled port does not remove the any-port rule");
         set_auto(&mut rules, rule(Some("1-2")), true);
         set_auto(&mut rules, rule(Some("1-3")), true);
         assert_eq!(rules.len(), 2, "port rules replace the any-port rule and keep each other");

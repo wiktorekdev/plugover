@@ -92,6 +92,20 @@ pub struct DeviceStatus {
     /// Its keyboard and mouse stay with this computer's desktop even then.
     #[serde(default)]
     pub desktop: bool,
+    #[serde(default)]
+    pub naming: Option<DeviceNaming>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct DeviceNaming {
+    /// The title the device would have without its own name.
+    pub model_title: String,
+    pub model_name: Option<String>,
+    pub model_kind: Option<crate::catalog::Kind>,
+    pub instance_name: Option<String>,
+    /// Set only when this device can be identified by serial instead of its port.
+    pub serial: Option<String>,
 }
 
 /// What happened to a device since the host daemon started. Times are Unix seconds.
@@ -154,6 +168,15 @@ pub struct Missing {
     /// Set when the rule is for one port.
     #[serde(default)]
     pub port: Option<String>,
+    #[serde(default)]
+    pub named: Option<MissingName>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct MissingName {
+    pub port: String,
+    pub serial: Option<String>,
 }
 
 /// A relay announced on the network.

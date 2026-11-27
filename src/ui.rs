@@ -19,7 +19,7 @@ pub const PORT: u16 = 7277;
 /// How long the code `plugover ui` puts in the address works.
 const CODE_LIFE: Duration = Duration::from_secs(60);
 /// What the page may ask the daemon; the same list the punktfunk plugin passes through.
-const OPS: &[&str] = &["status", "discover", "pair", "forget", "auto", "label", "attach", "detach", "unencrypted", "bt_scan", "bt_pair", "bt_forget"];
+const OPS: &str = include_str!("../data/ui-operations.txt");
 const MAX_HEAD: u64 = 16 << 10;
 const MAX_BODY: usize = 64 << 10;
 
@@ -188,7 +188,7 @@ fn route(d: &Arc<Daemon>, req: &Req) -> Reply {
 }
 
 fn api(d: &Arc<Daemon>, op: &str, req: &Req) -> Reply {
-    let value = if !OPS.contains(&op) {
+    let value = if !OPS.split_ascii_whitespace().any(|allowed| allowed == op) {
         json!({ "ok": false, "error": "unknown action" })
     } else {
         let mut body: Value = if req.body.is_empty() { json!({}) } else { serde_json::from_slice(&req.body).unwrap_or(Value::Null) };
@@ -255,6 +255,23 @@ mod tests {
         assert!(String::from_utf8(status.body).unwrap().contains(r#""ok":true"#));
         assert_eq!(with(("origin", "https://evil.example")).status, "403 Forbidden", "another site's page");
         assert_eq!(with(("sec-fetch-site", "cross-site")).status, "403 Forbidden");
+        for op in ["desktop", "bt_scan", "bt_pair", "bt_forget", "device_name"] {
+            let mut request = req(&format!("/api/{op}"), &[host, ("cookie", cookie.as_str())]);
+            request.method = "POST".into();
+            request.body = b"[]".to_vec();
+            let response = route(&d, &request);
+            let body: Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["error"], "bad request", "console must recognize {op}");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut desktop = req("/api/desktop", &[host, ("cookie", cookie.as_str())]);
+            desktop.method = "POST".into();
+            desktop.body = br#"{"device":"046d:c31c","on":true}"#.to_vec();
+            let reply = route(&d, &desktop);
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(body["ok"], true);
+        }
         let wrong = route(&d, &req("/api/session", &[host, ("cookie", cookie.as_str())]));
         assert!(String::from_utf8(wrong.body).unwrap().contains("unknown action"), "the page cannot fake streams");
         let _ = std::fs::remove_dir_all(root);

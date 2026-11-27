@@ -67,6 +67,16 @@ pub enum Request {
         #[serde(default)]
         kind: Option<catalog::Kind>,
     },
+    /// Names one device. A missing or empty name removes its override.
+    DeviceName {
+        relay: String,
+        device: String,
+        busid: String,
+        #[serde(default)]
+        serial: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+    },
     /// Keep the keyboard and mouse of `device` (vendor:product) with this computer's desktop when
     /// a stream runs the game on a screen of its own, or let them go there again.
     Desktop { device: String, on: bool },
@@ -76,6 +86,8 @@ pub enum Request {
         busid: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         take: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_owner: Option<String>,
     },
     Detach { relay: Option<String>, busid: String },
     /// Allows connecting a relay's devices without encryption, for a relay too old to encrypt.
@@ -110,6 +122,31 @@ fn punktfunk() -> String {
 }
 
 type Slot = (String, String); // (relay id, busid)
+
+fn naming_serial(device: &proto::DeviceInfo, devices: &[proto::DeviceInfo]) -> Option<String> {
+    let serial = crate::sysfs::real_serial(device.serial.as_deref()?)?;
+    (!devices.iter().any(|other| {
+        other.busid != device.busid
+            && other.id == device.id
+            && other.serial.as_deref().is_some_and(|value| value.trim() == serial)
+    }))
+    .then_some(serial)
+}
+
+fn device_name<'a>(
+    names: &'a [state::DeviceName],
+    relay: &str,
+    device: &proto::DeviceInfo,
+    devices: &[proto::DeviceInfo],
+) -> (Option<String>, Option<&'a state::DeviceName>) {
+    let named = |serial| names.iter().find(|n| n.matches(relay, &device.id, &device.busid, serial));
+    if let Some(name) = named(None) {
+        return (None, Some(name));
+    }
+    let serial = naming_serial(device, devices);
+    let name = serial.as_deref().and_then(|serial| named(Some(serial)));
+    (serial, name)
+}
 
 /// Whether `d` should be plugged in here now, given its rules, and if so whether it stays outside
 /// streams. Without a rule, a device that came back with another id is followed in the mode the
@@ -712,24 +749,6 @@ impl Daemon {
         });
     }
 
-    /// Turning auto-connect off gives the device back now, not only when the stream ends.
-    fn release(&self, relay: &str, device: &str) {
-        let _pass = self.reconciling.lock().unwrap();
-        let gone: Vec<Slot> = {
-            let (cfg, live, attached) = (self.cfg.lock().unwrap(), self.live.lock().unwrap(), self.attached.lock().unwrap());
-            let devices = live.get(relay).map_or(&[][..], |s| &s.devices[..]);
-            attached
-                .keys()
-                .filter(|(r, busid)| {
-                    r == relay
-                        && devices.iter().any(|d| d.busid == *busid && d.id == device && !cfg.auto.iter().any(|a| a.matches(relay, d)))
-                })
-                .cloned()
-                .collect()
-        };
-        self.unplug(|slot| gone.contains(slot));
-    }
-
     pub fn handle(self: &Arc<Self>, req: Request) -> Result<Value> {
         Ok(match req {
             Request::Status => reply(self.status())?,
@@ -763,6 +782,7 @@ impl Daemon {
                 let mut cfg = self.cfg.lock().unwrap();
                 cfg.relay.retain(|r| r.id != id);
                 cfg.auto.retain(|a| a.relay != id);
+                cfg.device_name.retain(|n| n.relay != id);
                 self.save(&cfg)?;
                 drop(cfg);
                 // Its devices go back too, even mid-stream.
@@ -777,25 +797,59 @@ impl Daemon {
             }
             Request::Auto { relay, device, on, port, mode } => {
                 let (relay, device) = (self.pick(relay.as_deref())?.id, state::device_id(&device)?);
-                let (title, busids) = {
-                    let live = self.live.lock().unwrap();
-                    let here = live.get(&relay).map_or(&[][..], |s| &s.devices[..]).iter().filter(|d| d.id == device);
-                    let busids: Vec<String> = here.clone().map(|d| d.busid.clone()).collect();
-                    (here.map(|d| d.identity.title.clone()).next(), busids)
-                };
+                let pass = self.reconciling.lock().unwrap();
                 let mut cfg = self.cfg.lock().unwrap();
+                anyhow::ensure!(cfg.relay.iter().any(|r| r.id == relay), "relay is no longer paired");
+                let live = self.live.lock().unwrap();
+                let devices = live.get(&relay).map_or(&[][..], |s| &s.devices[..]);
+                let targets = devices.iter().filter(|d| d.id == device && port.as_ref().is_none_or(|p| *p == d.busid));
+                let title = targets.clone().next().map(|d| d.identity.title.clone());
+                let busids: Vec<String> = targets.map(|d| d.busid.clone()).collect();
+                let same_model = cfg.auto.iter().filter(|a| a.relay == relay && a.device == device);
+                anyhow::ensure!(
+                    on || port.is_none() || !same_model.clone().any(|a| a.port.is_none()),
+                    "auto-connect covers all ports for this model; turn off the all-ports rule or narrow it first"
+                );
                 let mode = mode
-                    .or_else(|| cfg.auto.iter().find(|a| a.relay == relay && a.device == device && (port.is_none() || a.port == port)).map(|a| a.mode))
+                    .or_else(|| {
+                        same_model.clone().find(|a| a.port == port)
+                            .or_else(|| same_model.clone().find(|a| a.port.is_none() || port.is_none()))
+                            .map(|a| a.mode)
+                    })
                     .unwrap_or_default();
-                state::set_auto(&mut cfg.auto, AutoRule { relay: relay.clone(), device: device.clone(), title, port: port.clone(), mode }, on);
-                self.save(&cfg)?;
+                let previous = cfg.auto.clone();
+                state::set_auto(&mut cfg.auto, AutoRule { relay: relay.clone(), device: device.clone(), title, port, mode }, on);
+                let released: Vec<Slot> = {
+                    let (attached, tracks) = (self.attached.lock().unwrap(), self.tracks.lock().unwrap());
+                    attached.keys().filter(|slot| {
+                        let (r, busid) = slot;
+                        if r != &relay {
+                            return false;
+                        }
+                        // Attachments can outlast an interrupted control connection to the relay.
+                        let id = tracks.get(*slot).map(|t| t.id.as_str()).filter(|id| !id.is_empty())
+                            .or_else(|| devices.iter().find(|d| d.busid == *busid).map(|d| d.id.as_str()));
+                        id == Some(device.as_str())
+                            && previous.iter().any(|a| a.matches_port(r, &device, busid))
+                            && !cfg.auto.iter().any(|a| a.matches_port(r, &device, busid))
+                    }).cloned().collect()
+                };
+                drop(live);
+                if let Err(error) = self.save(&cfg) {
+                    cfg.auto = previous;
+                    return Err(error);
+                }
                 drop(cfg);
                 if on {
                     // Turning it on again undoes unplugging it by hand.
-                    self.held.lock().unwrap().retain(|(r, b)| !(*r == relay && busids.contains(b) && port.as_ref().is_none_or(|p| p == b)));
-                } else {
-                    self.release(&relay, &device);
+                    self.held.lock().unwrap().retain(|(r, b)| !(*r == relay && busids.contains(b)));
                 }
+                // A narrower rule gives back automatic connections outside its scope.
+                if !released.is_empty() {
+                    let manual = self.manual.lock().unwrap().clone();
+                    self.unplug(|slot| released.contains(slot) && (!on || !manual.contains(slot)));
+                }
+                drop(pass);
                 self.reconcile();
                 json!({ "ok": true })
             }
@@ -803,6 +857,34 @@ impl Daemon {
                 let mut cfg = self.cfg.lock().unwrap();
                 state::set_label(&mut cfg.label, state::device_id(&device)?, name, kind)?;
                 self.save(&cfg)?;
+                json!({ "ok": true })
+            }
+            Request::DeviceName { relay, device, busid, serial, name } => {
+                let device = state::device_id(&device)?;
+                let name = state::checked_name(name)?;
+                let mut cfg = self.cfg.lock().unwrap();
+                anyhow::ensure!(cfg.relay.iter().any(|r| r.id == relay), "no such relay");
+                if name.is_some() {
+                    let live = self.live.lock().unwrap();
+                    let devices = live.get(&relay).map_or(&[][..], |s| &s.devices[..]);
+                    let current = devices.iter().find(|d| d.busid == busid && d.id == device);
+                    anyhow::ensure!(
+                        current.is_some_and(|d| device_name(&cfg.device_name, &relay, d, devices).0 == serial),
+                        "the device changed or is unavailable; refresh and try again"
+                    );
+                }
+                let mut names = cfg.device_name.clone();
+                names.retain(|n| !n.matches(&relay, &device, &busid, serial.as_deref()));
+                if let Some(name) = name {
+                    names.push(state::DeviceName { relay, device, port: busid, serial, name });
+                }
+                if names != cfg.device_name {
+                    let previous = std::mem::replace(&mut cfg.device_name, names);
+                    if let Err(error) = self.save(&cfg) {
+                        cfg.device_name = previous;
+                        return Err(error);
+                    }
+                }
                 json!({ "ok": true })
             }
             Request::Desktop { device, on } => {
@@ -821,13 +903,14 @@ impl Daemon {
                 self.reconcile();
                 json!({ "ok": true })
             }
-            Request::Attach { relay, busid, take } => {
+            Request::Attach { relay, busid, take, expected_owner } => {
                 let relay = self.pick(relay.as_deref())?;
+                let encrypt = self.encryption(&relay)?;
                 if take {
-                    host::request(&relay, &proto::RelayRequest::Take { busid: busid.clone() })?;
+                    host::request(&relay, &proto::RelayRequest::Take { busid: busid.clone(), expected_owner })?;
                 }
                 let _pass = self.reconciling.lock().unwrap();
-                let a = vhci::attach(&self.sys, &relay, &busid, self.encryption(&relay)?)?;
+                let a = vhci::attach(&self.sys, &relay, &busid, encrypt)?;
                 let port = a.port;
                 let slot = (relay.id.clone(), busid);
                 let dev = self.live.lock().unwrap().get(&relay.id).and_then(|s| s.devices.iter().find(|d| d.busid == slot.1).map(|d| (d.id.clone(), d.serial.clone())));
@@ -900,10 +983,17 @@ impl Daemon {
                 let rules: Vec<&AutoRule> = cfg.auto.iter().filter(|a| a.relay == r.id).collect();
                 let status = |d: &proto::DeviceInfo| {
                     let slot = (r.id.clone(), d.busid.clone());
-                    let here = attached.contains_key(&slot) || d.lent_to.as_deref() == Some(self.name.as_str());
+                    let here = attached.contains_key(&slot);
                     let matched: Vec<&&AutoRule> = rules.iter().filter(|a| a.matches(&r.id, d)).collect();
                     let mut info = d.clone();
-                    state::Label::apply(&cfg.label, &d.id, &mut info.identity);
+                    let model = cfg.model_label(&d.id);
+                    let model_name = model.and_then(|l| l.name.clone());
+                    let model_kind = model.and_then(|l| l.kind);
+                    info.identity.relabel(model_name.as_deref(), model_kind);
+                    let (serial, named) = device_name(&cfg.device_name, &r.id, d, devices);
+                    let instance_name = named.map(|n| n.name.clone());
+                    let model_title = info.identity.title.clone();
+                    info.identity.relabel(instance_name.as_deref(), None);
                     let (routed, route_error) = if attached.contains_key(&slot) { self.routing(&slot) } else { (None, None) };
                     api::DeviceStatus {
                         routed,
@@ -917,24 +1007,34 @@ impl Daemon {
                         always: matched.iter().any(|a| a.always(watching)),
                         error: (!here && d.lent_to.is_none() && !matched.is_empty()).then(|| failed.get(&slot).map(|(why, _)| why.clone())).flatten(),
                         history: tracks.get(&slot).map(|t| t.history.clone()).unwrap_or_default(),
+                        naming: Some(api::DeviceNaming { model_title, model_name, model_kind, instance_name, serial }),
                     }
                 };
                 // Chosen devices that are not plugged into the relay (or it is offline).
                 let missing = rules
                     .iter()
                     .filter(|a| !devices.iter().any(|d| a.matches(&r.id, d)))
-                    .map(|a| api::Missing {
-                        id: a.device.clone(),
+                    .map(|a| {
+                        let mut names = cfg.device_name.iter().filter(|n| {
+                            n.relay == r.id && n.device == a.device && a.port.as_ref() == Some(&n.port)
+                                && n.serial.as_ref().is_none_or(|serial| {
+                                    !devices.iter().any(|d| d.id == n.device && d.serial.as_ref() == Some(serial))
+                                })
+                        });
+                        let named = names.clone().find(|n| n.serial.is_none())
+                            .or_else(|| names.next().filter(|_| names.next().is_none()));
                         // Rules from before 0.5 have no title; the catalog may still know the device.
-                        title: cfg
-                            .label
-                            .iter()
-                            .find(|l| l.device == a.device)
-                            .and_then(|l| l.name.clone())
+                        let title = named.map(|n| n.name.clone())
+                            .or_else(|| cfg.model_label(&a.device).and_then(|l| l.name.clone()))
                             .or_else(|| a.title.clone())
                             .or_else(|| catalog::catalog_title(&a.device))
-                            .unwrap_or_else(|| a.device.clone()),
-                        port: a.port.clone(),
+                            .unwrap_or_else(|| a.device.clone());
+                        api::Missing {
+                            id: a.device.clone(),
+                            title,
+                            port: a.port.clone(),
+                            named: named.map(|n| api::MissingName { port: n.port.clone(), serial: n.serial.clone() }),
+                        }
                     })
                     .collect();
                 api::RelayStatus {
@@ -1226,12 +1326,154 @@ mod tests {
                 blocked: None,
             },
             lent_to: None,
+            reserved: false,
             serial: None,
         }
     }
 
     fn rule(device: &str, mode: state::Mode) -> AutoRule {
         AutoRule { relay: "r".into(), device: device.into(), title: None, port: None, mode }
+    }
+
+    #[test]
+    fn device_names_follow_a_serial_or_stay_with_the_port() {
+        let root = std::env::temp_dir().join(format!("plugover-hostd-naming-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let open = || Daemon::open(root.join("sys"), root.join("host.toml")).unwrap();
+        let daemon = open();
+        let model = "046d:c24f";
+        let paired = |id: &str| PairedRelay {
+            id: id.into(), name: id.into(), address: "127.0.0.1:1".into(), host_id: "00".repeat(8),
+            key: "00".repeat(32), encrypts: true, unencrypted: false,
+        };
+        {
+            let mut cfg = daemon.cfg.lock().unwrap();
+            cfg.relay = vec![paired("r"), paired("other")];
+            cfg.auto.push(AutoRule { port: Some("1-2".into()), ..rule(model, state::Mode::Session) });
+        }
+        daemon.handle(Request::Label { device: model.into(), name: Some("Wheel model".into()), kind: Some(catalog::Kind::Other) }).unwrap();
+
+        let serial_pad = |busid: &str| proto::DeviceInfo { serial: Some("ABCD".into()), ..device(busid, model) };
+        let snapshot = |relay: &str, devices: Vec<_>| Snapshot {
+            relay_id: relay.into(), relay: relay.into(), devices, version: proto::VERSION.into(), encrypted: true,
+        };
+        let show = |relay, devices| daemon.live.lock().unwrap().insert(relay, devices);
+        show("r".into(), snapshot("r", vec![serial_pad("1-1"), device("1-2", model)]));
+        show("other".into(), snapshot("other", vec![serial_pad("1-1"), device("1-2", model)]));
+        let request = |busid: &str, serial: Option<&str>, name: Option<&str>| Request::DeviceName {
+            relay: "r".into(), device: model.into(), busid: busid.into(), serial: serial.map(str::to_string), name: name.map(str::to_string),
+        };
+        let titles = || daemon.status().relays.into_iter().map(|relay| {
+            relay.devices.into_iter().map(|d| d.info.identity.title).collect::<Vec<_>>()
+        }).collect::<Vec<_>>();
+
+        assert!(daemon.handle(request("1-1", None, Some("Stale selection"))).is_err());
+        daemon.handle(request("1-1", Some("ABCD"), Some(" Driver "))).unwrap();
+        daemon.handle(request("1-2", None, Some("Passenger"))).unwrap();
+        assert_eq!(titles(), [vec!["Driver", "Passenger"], vec!["Wheel model", "Wheel model"]]);
+
+        show("r".into(), snapshot("r", vec![device("1-1", model), serial_pad("1-3"), device("1-2", "045e:028e")]));
+        assert_eq!(titles()[0], ["Wheel model", "Driver", "wheel"]);
+        assert_eq!(daemon.status().relays[0].devices[1].info.identity.kind, catalog::Kind::Other);
+
+        let restarted = open();
+        let missing = &restarted.status().relays[0].missing[0];
+        assert_eq!(missing.title, "Passenger");
+        assert!(missing.named.is_some());
+        restarted.handle(request("1-2", None, None)).unwrap();
+        assert_eq!(restarted.status().relays[0].missing[0].title, "Wheel model");
+        assert_eq!(restarted.cfg.lock().unwrap().device_name.len(), 1);
+        restarted.handle(request("1-3", Some("ABCD"), None)).unwrap();
+        assert!(restarted.cfg.lock().unwrap().device_name.is_empty());
+        assert_eq!(restarted.cfg.lock().unwrap().label[0].name.as_deref(), Some("Wheel model"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_and_placeholder_serials_fall_back_to_ports() {
+        let first = proto::DeviceInfo { serial: Some("SAME".into()), ..device("1-1", "046d:c24f") };
+        let second = proto::DeviceInfo { busid: "1-2".into(), ..first.clone() };
+        let saved = |port: &str, serial: Option<&str>| state::DeviceName {
+            relay: "r".into(), device: first.id.clone(), port: port.into(),
+            serial: serial.map(str::to_string), name: port.into(),
+        };
+        let serial_name = saved("1-1", Some("SAME"));
+        let port_name = saved("1-2", None);
+        let names = [serial_name.clone(), port_name.clone()];
+        let twins = &[first.clone(), second.clone()];
+        assert_eq!(device_name(&names, "r", &first, twins), (None, None));
+        assert_eq!(device_name(&names, "r", &second, twins), (None, Some(&port_name)));
+        assert_eq!(device_name(&names, "r", &second, std::slice::from_ref(&second)), (None, Some(&port_name)));
+        assert_eq!(device_name(std::slice::from_ref(&port_name), "r", &second, std::slice::from_ref(&second)), (None, Some(&port_name)));
+
+        assert_eq!(naming_serial(&first, std::slice::from_ref(&first)).as_deref(), Some("SAME"));
+        let placeholder = proto::DeviceInfo { serial: Some(" 00000 ".into()), ..first };
+        assert_eq!(naming_serial(&placeholder, std::slice::from_ref(&placeholder)), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn narrowing_auto_connect_releases_only_connections_that_lose_their_rule() {
+        let root = std::env::temp_dir().join(format!("plugover-hostd-auto-ports-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let vhci = root.join("sys/devices/platform/vhci_hcd.0");
+        fs::create_dir_all(&vhci).unwrap();
+        fs::write(vhci.join("detach"), "").unwrap();
+        fs::write(vhci.join("status"), "hub port sta\nhs 1 6\nhs 2 6\nhs 3 6\n").unwrap();
+        let d = Daemon::open(root.join("sys"), root.join("host.toml")).unwrap();
+        let id = "046d:c24f";
+        let devices = (1..=3).map(|p| device(&format!("1-{p}"), id)).collect();
+        d.live.lock().unwrap().insert(
+            "r".into(),
+            Snapshot { relay_id: "r".into(), relay: "rig".into(), devices, version: proto::VERSION.into(), encrypted: true },
+        );
+        {
+            let mut cfg = d.cfg.lock().unwrap();
+            cfg.relay.push(PairedRelay { id: "r".into(), name: "rig".into(), address: "127.0.0.1:1".into(), host_id: "00".repeat(8), key: "00".repeat(32), encrypts: true, unencrypted: false });
+            cfg.auto.push(rule(id, state::Mode::Always));
+        }
+        for (port, busid) in [(1, "1-1"), (2, "1-2"), (3, "1-3")] {
+            d.attached.lock().unwrap().insert(("r".into(), busid.into()), vhci::Attachment { port, hid: None });
+        }
+        let slot = |busid: &str| ("r".to_string(), busid.to_string());
+        d.manual.lock().unwrap().insert(slot("1-3"));
+
+        let auto = |busid: &str, on, mode| d.handle(Request::Auto {
+            relay: Some("r".into()), device: id.into(), on, port: Some(busid.into()), mode,
+        });
+        assert!(auto("1-1", false, None).is_err(), "a port-specific disable cannot remove a model-wide rule");
+        auto("1-1", true, None).unwrap();
+        assert_eq!(fs::read_to_string(vhci.join("detach")).unwrap(), "2");
+        assert_eq!(d.cfg.lock().unwrap().auto[0].mode, state::Mode::Always, "narrowing preserves the inherited mode");
+        assert!(d.attached.lock().unwrap().contains_key(&slot("1-1")));
+        assert!(d.attached.lock().unwrap().contains_key(&slot("1-3")), "a manual connection survives narrowing");
+
+        {
+            let mut live = d.live.lock().unwrap();
+            let reserved = &mut live.get_mut("r").unwrap().devices[1];
+            reserved.lent_to = Some(d.name.clone());
+            reserved.reserved = true;
+        }
+        auto("1-2", true, Some(state::Mode::Always)).unwrap();
+        let status = d.status();
+        let rows = &status.relays[0].devices;
+        assert!(rows[0].auto_port && rows[1].auto_port && !rows[2].auto);
+        assert!(matches!(rows[1].state, api::DeviceState::Elsewhere), "a reservation is not a local attachment");
+
+        auto("1-1", false, None).unwrap();
+        assert_eq!(fs::read_to_string(vhci.join("detach")).unwrap(), "1");
+        let cfg: HostConfig = state::load(&root.join("host.toml")).unwrap();
+        assert_eq!(cfg.auto.len(), 1);
+        assert_eq!(cfg.auto[0].port.as_deref(), Some("1-2"));
+
+        // A missing snapshot is not evidence that a tracked attachment was unplugged.
+        d.attached.lock().unwrap().insert(slot("1-2"), vhci::Attachment { port: 2, hid: None });
+        d.plugged(&slot("1-2"), id, None, true);
+        d.live.lock().unwrap().remove("r");
+        auto("1-2", false, None).unwrap();
+        assert_eq!(fs::read_to_string(vhci.join("detach")).unwrap(), "2");
+        assert!(!d.attached.lock().unwrap().contains_key(&slot("1-2")));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
