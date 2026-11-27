@@ -5,7 +5,7 @@ title: "Compatibility: "
 labels: compatibility
 ---
 
-<!-- Reports fill the compatibility tables in the README. Working setups help as much as broken ones. -->
+<!-- Reports fill the Tested list in the README. Working setups help as much as broken ones. -->
 
 **Result:** works / works with problems / does not work
 
