@@ -9,7 +9,7 @@ import { cn } from "@unom/ui/lib/utils";
 import { Spinner } from "@unom/ui/spinner";
 import { Toaster, toast } from "@unom/ui/toast";
 import { Bluetooth, ChevronDown, ChevronLeft, Ellipsis, Monitor, Pause, Play, Plus, RotateCw, Unplug, X } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from "react";
 import {
 	ApiError,
 	call,
@@ -28,8 +28,21 @@ import {
 	steady,
 } from "./api";
 import { KIND_ICON } from "./icons";
+import { latestRefresh } from "./latest-refresh";
 
 const POLL_MS = 2000;
+type PairedRelay = Pick<Relay, "id" | "name">;
+
+const SESSION_LABEL = new Map([
+	["cli", "CLI"],
+	["sunshine", "Sunshine"],
+	["apollo", "Apollo"],
+	["vibeshine", "Vibeshine"],
+	["polaris", "Polaris"],
+	["hermes", "Hermes"],
+	["parsec", "Parsec"],
+	["steam", "Steam Remote Play"],
+]);
 
 /** `watching`: something on this host reports streams, which decides what auto does. */
 const MODE_LABEL: Record<Mode, (watching: boolean) => string> = {
@@ -49,18 +62,55 @@ const KIND_ORDER = Object.keys(KIND_LABEL) as Kind[];
 const OFF_RING = "data-[state=unchecked]:ring-1 data-[state=unchecked]:ring-muted-foreground/40";
 
 export function App() {
-	const [status, setStatus] = useState<Status>();
+	const [lastStatus, setLastStatus] = useState<{ status: Status; at: Date }>();
 	const [error, setError] = useState<ApiError>();
 	const [adding, setAdding] = useState(false);
+	const [waitingFor, setWaitingFor] = useState<PairedRelay[]>([]);
+	const pendingPairings = useRef(new Map<string, PairedRelay>());
 
-	const refresh = useCallback(async () => {
-		try {
-			setStatus(await call<Status>("status"));
-			setError(undefined);
-		} catch (e) {
-			setError(e instanceof ApiError ? e : new ApiError(String(e), false));
-		}
-	}, []);
+	const [{ refresh, invalidate }] = useState(() =>
+		latestRefresh(
+			async () => {
+				try {
+					return { status: await call<Status>("status") } as const;
+				} catch (e) {
+					return { error: e instanceof ApiError ? e : new ApiError(String(e), false) } as const;
+				}
+			},
+			(result) => {
+				if (!result.status) {
+					setError(result.error);
+					return;
+				}
+				setLastStatus({ status: result.status, at: new Date() });
+				setError(undefined);
+
+				const pending = pendingPairings.current;
+				const before = pending.size;
+				for (const [id, paired] of pending) {
+					const relay = result.status.relays.find((relay) => relay.id === id);
+					if (relay && !relay.online) continue;
+					pending.delete(id);
+					if (relay) {
+						const count = relay.devices.filter((device) => !device.blocked).length;
+						toast.success(`Paired with ${paired.name} · ${count} ${count === 1 ? "device" : "devices"} available`);
+					}
+				}
+				if (pending.size !== before) setWaitingFor([...pending.values()]);
+			},
+		),
+	);
+
+	const paired = (relay: PairedRelay) => {
+		pendingPairings.current.set(relay.id, relay);
+		setWaitingFor([...pendingPairings.current.values()]);
+		setAdding(false);
+		void refresh();
+	};
+	const forgot = (id: string) => {
+		if (pendingPairings.current.delete(id)) setWaitingFor([...pendingPairings.current.values()]);
+		return refresh();
+	};
 
 	// The next poll waits for the last answer, so a slow daemon is not sent a pile of requests.
 	useEffect(() => {
@@ -74,11 +124,13 @@ export function App() {
 		return () => {
 			stopped = true;
 			clearTimeout(timer);
+			invalidate();
 		};
-	}, [refresh]);
+	}, [invalidate, refresh]);
 
+	const status = lastStatus?.status;
 	let content: React.ReactNode;
-	if (error?.offline) {
+	if (!status && error?.offline) {
 		content = (
 			<EmptyState
 				icon={Unplug}
@@ -96,10 +148,6 @@ export function App() {
 			</div>
 		);
 	} else if (status.relays.length === 0 || adding) {
-		const paired = () => {
-			setAdding(false);
-			void refresh();
-		};
 		content = <Setup onPaired={paired} onCancel={status.relays.length > 0 ? () => setAdding(false) : undefined} />;
 	} else {
 		content = (
@@ -113,7 +161,18 @@ export function App() {
 					</Card>
 				)}
 				{status.relays.map((r) => (
-					<RelayView key={r.id} relay={r} hostVersion={status.version} session={status.session} watching={status.watching} bluetooth={status.bluetooth} screens={status.screens} refresh={refresh} />
+					<RelayView
+						key={r.id}
+						relay={r}
+						hostVersion={status.version}
+						session={status.session}
+						watching={status.watching}
+						bluetooth={status.bluetooth}
+						screens={status.screens}
+						refresh={refresh}
+						onPaired={paired}
+						onForgot={forgot}
+					/>
 				))}
 				{/* Close under the last relay rather than a whole section gap away. */}
 				<div className="-mt-7">
@@ -129,6 +188,17 @@ export function App() {
 		<main className="mx-auto flex max-w-3xl flex-col gap-10 px-4 py-8 sm:px-6">
 			{/* Inside the console its page header already says Plugover. */}
 			{!EMBEDDED && <h1 className="-mb-4 text-2xl font-semibold tracking-tight">Plugover</h1>}
+			{lastStatus && error && (
+				<p role="status" title={error.message} className="text-sm text-warn">
+					Showing the last known status · Updated at{" "}
+					{lastStatus.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+				</p>
+			)}
+			{waitingFor.map((relay) => (
+				<p key={relay.id} role="status" className="text-sm text-muted-foreground">
+					Paired with {relay.name}. Waiting for its device list…
+				</p>
+			))}
 			{content}
 			{/* Sonner defaults to light; the console and this page are always dark, in the theme's colors. */}
 			<Toaster theme="dark" style={TOAST_COLORS} />
@@ -143,12 +213,21 @@ function StreamBanner({ status }: { status: Status }) {
 	const from = [...new Set(here)];
 	const count = (n: number) => `${n} ${n === 1 ? "device" : "devices"}`;
 	const devices = count(here.length);
+	const [source, ...moreSources] = (status.sessions ?? []).map((source) => SESSION_LABEL.get(source) ?? source);
 	const Icon = status.session ? Play : Pause;
 	return (
 		<Card muted colorVariant={status.session ? "accent" : "default"} className="flex-row items-center gap-4">
 			<Icon className={cn("size-5 shrink-0", status.session ? "text-primary" : "text-muted-foreground")} />
 			<div className="min-w-0 flex-1">
-				<p className="font-medium">{status.session ? "Stream running" : "No stream"}</p>
+				<p className="break-words font-medium">
+					{status.session ? "Stream running" : "No stream"}
+					{status.session && source && (
+						<span className="text-sm font-normal text-muted-foreground">
+							{" · "}{source}
+							{moreSources.length > 0 && <MoreSessionSources sources={moreSources} />}
+						</span>
+					)}
+				</p>
 				<p className="text-sm text-muted-foreground">
 					{status.session
 						? here.length > 0
@@ -170,7 +249,29 @@ function StreamBanner({ status }: { status: Status }) {
 	);
 }
 
-function Setup({ onPaired, onCancel }: { onPaired: () => void; onCancel?: () => void }) {
+function MoreSessionSources({ sources }: { sources: string[] }) {
+	const [expanded, setExpanded] = useState(false);
+	const details = useId();
+	return (
+		<>
+			<button
+				type="button"
+				aria-expanded={expanded}
+				aria-controls={details}
+				className="ml-2 rounded border border-border px-1.5 text-xs text-foreground hover:bg-neutral-accent"
+				onClick={() => setExpanded((open) => !open)}
+			>
+				+{sources.length}
+				<span className="sr-only"> more stream {sources.length === 1 ? "source" : "sources"}</span>
+			</button>
+			<span id={details} hidden={!expanded} className={expanded ? "mt-1 block" : undefined}>
+				{sources.join(", ")}
+			</span>
+		</>
+	);
+}
+
+function Setup({ onPaired, onCancel }: { onPaired: (relay: PairedRelay) => void; onCancel?: () => void }) {
 	const [found, setFound] = useState<Found[]>();
 	const [target, setTarget] = useState<{ name: string; address: string }>();
 	const [address, setAddress] = useState("");
@@ -191,7 +292,18 @@ function Setup({ onPaired, onCancel }: { onPaired: () => void; onCancel?: () => 
 
 	const pair = (name: string, address: string) => setTarget({ name, address });
 
-	if (target) return <CodeEntry {...target} onCancel={() => setTarget(undefined)} onPaired={onPaired} />;
+	if (target) {
+		return (
+			<CodeEntry
+				{...target}
+				onCancel={() => setTarget(undefined)}
+				onPaired={(relay) => {
+					setTarget(undefined);
+					onPaired(relay);
+				}}
+			/>
+		);
+	}
 
 	const submit = (e: FormEvent) => {
 		e.preventDefault();
@@ -255,7 +367,7 @@ function Setup({ onPaired, onCancel }: { onPaired: () => void; onCancel?: () => 
 						Pair
 					</Button>
 				</form>
-				<Button variant="ghost" className="h-input-height" onClick={discover}>
+				<Button variant="ghost" className="h-input-height" onClick={discover} disabled={found === undefined}>
 					Search again
 				</Button>
 			</div>
@@ -268,7 +380,7 @@ function CodeEntry({
 	address,
 	onCancel,
 	onPaired,
-}: { name: string; address: string; onCancel: () => void; onPaired: () => void }) {
+}: { name: string; address: string; onCancel: () => void; onPaired: (relay: PairedRelay) => void }) {
 	const [code, setCode] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [failure, setFailure] = useState<string>();
@@ -276,12 +388,12 @@ function CodeEntry({
 
 	const submit = async (e: FormEvent) => {
 		e.preventDefault();
+		if (busy || digits.length !== 6) return;
 		setBusy(true);
 		setFailure(undefined);
 		try {
-			await call("pair", { address, code: digits });
-			toast.success(`Paired with ${name}`);
-			onPaired();
+			const { relay } = await call<{ relay: PairedRelay }>("pair", { address, code: digits });
+			onPaired(relay);
 		} catch (err) {
 			setFailure((err as Error).message);
 		} finally {
@@ -291,7 +403,7 @@ function CodeEntry({
 
 	return (
 		<section className="flex flex-col gap-6">
-			<BackLink onClick={onCancel} />
+			<BackLink onClick={onCancel} disabled={busy} />
 			<header>
 				<h1 className="text-2xl font-semibold tracking-tight">Pair with {name}</h1>
 				<p className="mt-1 max-w-prose text-muted-foreground">
@@ -307,6 +419,7 @@ function CodeEntry({
 						inputMode="numeric"
 						autoComplete="one-time-code"
 						aria-label="Pairing code"
+						disabled={busy}
 						autoFocus
 						className="w-44 text-center font-mono text-xl tracking-[0.3em] md:text-xl"
 					/>
@@ -314,7 +427,7 @@ function CodeEntry({
 						{busy ? <Spinner /> : "Pair"}
 					</Button>
 				</form>
-				{failure && <p className="text-sm text-destructive">Pairing failed: {failure}</p>}
+				{failure && <p role="alert" className="text-sm text-destructive">Pairing failed. {failure}</p>}
 				<p className="text-sm text-muted-foreground">
 					Lost it? Run <Cmd>plugover code</Cmd> on {name} as root or administrator for a new one. A code works once,
 					for 15 minutes.
@@ -324,24 +437,24 @@ function CodeEntry({
 	);
 }
 
-function BackLink({ onClick }: { onClick: () => void }) {
+function BackLink({ onClick, disabled }: { onClick: () => void; disabled?: boolean }) {
 	return (
 		<div className="-mb-3">
-			<Button size="sm" variant="ghost" className="-ml-3" onClick={onClick}>
+			<Button size="sm" variant="ghost" className="-ml-3" onClick={onClick} disabled={disabled}>
 				<ChevronLeft className="size-4" /> Back
 			</Button>
 		</div>
 	);
 }
 
-async function act(op: string, body: object, done: string, refresh: () => Promise<void>) {
+async function act(op: string, body: object, done: string | undefined, refresh: () => Promise<void>) {
 	try {
 		await call(op, body);
-		toast.success(done);
-		await refresh();
+		if (done) toast.success(done);
 	} catch (e) {
 		toast.error((e as Error).message);
 	}
+	await refresh();
 }
 
 function RelayView({
@@ -352,10 +465,22 @@ function RelayView({
 	bluetooth,
 	screens,
 	refresh,
-}: { relay: Relay; hostVersion?: string; session: boolean; watching: boolean; bluetooth: boolean; screens: boolean; refresh: () => Promise<void> }) {
-	// Hubs, storage, network adapters and what the relay does not share are left out. Game devices
-	// come first, in a fixed order, so rows do not jump around when they are turned on or off.
+	onPaired,
+	onForgot,
+}: {
+	relay: Relay;
+	hostVersion?: string;
+	session: boolean;
+	watching: boolean;
+	bluetooth: boolean;
+	screens: boolean;
+	refresh: () => Promise<void>;
+	onPaired: (relay: PairedRelay) => void;
+	onForgot: (id: string) => Promise<void>;
+}) {
+	// Game devices come first, in a fixed order, so rows do not jump around when turned on or off.
 	const devices = relay.devices.filter((d) => !d.blocked).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.title.localeCompare(b.title));
+	const excluded = relay.devices.filter((d) => d.blocked);
 	const missing = relay.missing ?? [];
 	const unpaired = relay.error?.includes("pair again") ?? false;
 	// A relay too old to encrypt gets its own card, which says to update it too.
@@ -366,14 +491,14 @@ function RelayView({
 	const [repairing, setRepairing] = useState(false);
 	const [pairing, setPairing] = useState(false);
 	const [menu, setMenu] = useState(false);
-	// Several of the same model: rows say which port is which.
-	const twins = (d: Device) => relay.devices.filter((o) => o.id === d.id).length > 1;
+	// Keep port rules independent even while another device of this model is unplugged.
+	const twins = (d: Device) => devices.some((o) => o.busid !== d.busid && o.id === d.id) || missing.some((m) => m.id === d.id && m.port != null);
 
 	// Pairing again keeps this relay's auto-connect choices; forgetting it would not.
 	if (repairing) {
-		const done = () => {
+		const done = (paired: PairedRelay) => {
 			setRepairing(false);
-			void refresh();
+			onPaired(paired);
 		};
 		return <CodeEntry name={relay.name} address={relay.address} onCancel={() => setRepairing(false)} onPaired={done} />;
 	}
@@ -425,7 +550,7 @@ function RelayView({
 						<Button size="sm" variant="ghost" onClick={() => setRepairing(true)}>
 							Pair again
 						</Button>
-						<ForgetButton relay={relay} refresh={refresh} />
+						<ForgetButton relay={relay} refresh={() => onForgot(relay.id)} />
 					</div>
 				)}
 			</div>
@@ -484,7 +609,17 @@ function RelayView({
 			<div className="flex flex-col gap-2">
 				<Card padding={false}>
 					{devices.map((d) => (
-						<DeviceRow key={d.busid} relay={relay} device={d} twins={twins(d)} session={session} watching={watching} screens={screens} refresh={refresh} />
+						<DeviceRow
+							key={d.busid}
+							relay={relay}
+							device={d}
+							twins={twins(d)}
+							duplicateName={devices.some((o) => o.busid !== d.busid && o.title === d.title)}
+							session={session}
+							watching={watching}
+							screens={screens}
+							refresh={refresh}
+						/>
 					))}
 					{missing.map((m) => (
 						<MissingRow key={`${m.id}-${m.port ?? ""}`} relay={relay} device={m} refresh={refresh} />
@@ -495,6 +630,20 @@ function RelayView({
 						</p>
 					)}
 				</Card>
+				{relay.online && excluded.length > 0 && (
+					<details className="px-1 text-sm text-muted-foreground">
+						<summary className="w-fit cursor-pointer rounded-sm hover:text-foreground">
+							{excluded.length} {excluded.length === 1 ? "device" : "devices"} excluded
+						</summary>
+						<ul className="ml-4 mt-1 space-y-0.5">
+							{excluded.map((d) => (
+								<li key={d.busid} className="break-words">
+									<span className="text-foreground">{d.title}</span> · {d.blocked}
+								</li>
+							))}
+						</ul>
+					</details>
+				)}
 			</div>
 		</section>
 	);
@@ -599,25 +748,36 @@ function DeviceRow({
 	relay,
 	device: d,
 	twins,
+	duplicateName,
 	session,
 	watching,
 	screens,
 	refresh,
-}: { relay: Relay; device: Device; twins: boolean; session: boolean; watching: boolean; screens: boolean; refresh: () => Promise<void> }) {
+}: { relay: Relay; device: Device; twins: boolean; duplicateName: boolean; session: boolean; watching: boolean; screens: boolean; refresh: () => Promise<void> }) {
 	const [open, setOpen] = useState(false);
+	const [takeFrom, setTakeFrom] = useState<string>();
+	const takeButton = useRef<HTMLButtonElement>(null);
 	/** What the switch is doing right now, which can take a few seconds during a stream. */
 	const [busy, setBusy] = useState<string>();
 	const here = d.state === "here";
-	const run = async (op: string, body: object, done: string, doing: string) => {
+	const showPort = twins || duplicateName || d.auto_port;
+	const deviceName = showPort ? `${d.title} at port ${d.busid}` : d.title;
+	const modelRule = d.auto && !d.auto_port && twins;
+	const owner = d.state === "elsewhere" && !d.reserved && d.lent_to !== "another USB/IP client" ? d.lent_to ?? undefined : undefined;
+	const confirmingTake = owner !== undefined && takeFrom === owner;
+	useEffect(() => setTakeFrom(undefined), [owner]);
+	const run = async (op: string, body: object, done: string | undefined, doing: string) => {
 		setBusy(doing);
 		await act(op, { relay: relay.id, ...body }, done, refresh);
 		setBusy(undefined);
 	};
-	const note =
-		busy ??
-		(d.state === "elsewhere" ? `In use by ${d.lent_to}` : d.auto && !here && !session && !d.always ? "Connects when a stream starts" : undefined);
-	// What turning it on does now: a new rule is in auto mode.
-	const connectsNow = session || (d.auto ? d.always : !watching);
+	const note = busy ?? (d.state === "elsewhere"
+		? `${d.reserved ? "Reserved for" : "In use by"} ${d.lent_to}`
+		: d.auto && !here && !session && !d.always ? "Connects when a stream starts" : undefined);
+	const toggleAuto = (on: boolean) => {
+		const port = d.auto_port || (on && twins) ? d.busid : undefined;
+		return run("auto", { device: d.id, on, port }, undefined, "Saving…");
+	};
 
 	return (
 		<div className="border-b border-border last:border-0">
@@ -629,7 +789,8 @@ function DeviceRow({
 					<div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
 						<span>
 							{KIND_LABEL[d.kind]}
-							{(twins || d.auto_port) && ` · port ${d.busid}${d.auto_port ? " only" : ""}`}
+							{showPort && ` · port ${d.busid}`}
+							{modelRule && " · auto-connect on all ports"}
 							{note && ` · ${note}`}
 						</span>
 						{here && <Badge size="sm">Connected</Badge>}
@@ -638,31 +799,44 @@ function DeviceRow({
 					{d.routed && <p className="mt-1 text-sm text-muted-foreground">Keyboard and mouse go into the stream's own screen ({d.routed})</p>}
 					{d.route_error && <p className="mt-1 break-words text-sm text-destructive">The game's screen does not get its keyboard or mouse: {d.route_error}</p>}
 				</div>
-				{d.state === "elsewhere" && d.lent_to !== "another USB/IP client" && (
-					<Button
-						size="sm"
-						variant="secondary"
-						disabled={busy !== undefined}
-						onClick={() => run("attach", { busid: d.busid, take: true }, `${d.title} is here now`, "Taking over…")}
-					>
-						Take over
-					</Button>
+				{owner && (
+					<div className="flex shrink-0 items-center gap-1">
+						<Button
+							ref={takeButton}
+							size="sm"
+							variant="secondary"
+							className={confirmingTake ? "h-auto max-w-32 whitespace-normal [overflow-wrap:anywhere]" : undefined}
+							disabled={busy !== undefined}
+							aria-label={confirmingTake ? undefined : `Take over ${deviceName}`}
+							onClick={() => {
+								if (!confirmingTake) {
+									setTakeFrom(owner);
+									return;
+								}
+								setTakeFrom(undefined);
+								void run("attach", { busid: d.busid, take: true, expected_owner: owner }, `${deviceName} connected`, "Taking over…");
+							}}
+						>
+							{confirmingTake ? `Take from ${owner}?` : "Take over"}
+						</Button>
+						{confirmingTake && (
+							<Button size="icon" variant="ghost" aria-label={`Cancel takeover of ${deviceName}`} onClick={() => {
+								setTakeFrom(undefined);
+								takeButton.current?.focus();
+							}}>
+								<X className="size-4" />
+							</Button>
+						)}
+					</div>
 				)}
 				<Switch
 					className={OFF_RING}
 					checked={d.auto}
 					disabled={busy !== undefined}
-					aria-label={`Use ${d.title} here`}
-					onCheckedChange={(on) =>
-						run(
-							"auto",
-							{ device: d.id, on },
-							on ? (connectsNow ? `${d.title} connected` : `${d.title} connects when a stream starts`) : `${d.title} is free again`,
-							on ? (connectsNow ? "Connecting…" : "Saving…") : here ? "Releasing…" : "Saving…",
-						)
-					}
+					aria-label={`Auto-connect ${modelRule ? `all ports for ${d.title}` : deviceName}`}
+					onCheckedChange={toggleAuto}
 				/>
-				<Button size="icon" variant="ghost" aria-label={`Details for ${d.title}`} aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+				<Button size="icon" variant="ghost" aria-label={`Details for ${deviceName}`} aria-expanded={open} onClick={() => setOpen((o) => !o)}>
 					<ChevronDown className={cn("size-4 transition-transform", open && "rotate-180")} />
 				</Button>
 			</div>
@@ -732,7 +906,7 @@ function DeviceRow({
 										run(
 											"auto",
 											{ device: d.id, on: true, port: d.auto_port ? d.busid : undefined, mode },
-											`${d.title}: ${MODE_LABEL[mode as Mode](watching).toLowerCase()}`,
+										`Auto-connect timing saved for ${modelRule ? `all ports for ${d.title}` : deviceName}`,
 											"Saving…",
 										)
 									}
@@ -764,7 +938,7 @@ function DeviceRow({
 										run(
 											"auto",
 											{ device: d.id, on: true, port: only ? d.busid : undefined, mode: d.mode },
-											only ? `Only the ${d.title} on port ${d.busid} connects` : `Any ${d.title} connects`,
+										only ? `Port ${d.busid} saved for ${d.title}` : `Auto-connect enabled on all ports for ${d.title}`,
 											"Saving…",
 										)
 									}
@@ -772,9 +946,9 @@ function DeviceRow({
 							</dd>
 						</>
 					)}
-					<dt className="pt-1.5 text-muted-foreground">Wrong name or kind?</dt>
-					<dd>
-						<LabelForm device={d} refresh={refresh} />
+					<dt className="pt-1.5 text-muted-foreground">Name and kind</dt>
+					<dd className="min-w-0">
+						<DeviceLabels key={JSON.stringify([d.id, d.serial])} relay={relay.id} device={d} refresh={refresh} />
 					</dd>
 				</dl>
 			)}
@@ -782,10 +956,89 @@ function DeviceRow({
 	);
 }
 
-/** Names a model or corrects its kind on this host; every device with the same USB id follows. */
-function LabelForm({ device: d, refresh }: { device: Device; refresh: () => Promise<void> }) {
-	const [name, setName] = useState(d.source === "user" ? d.title : "");
-	const [kind, setKind] = useState<Kind>(d.kind);
+function DeviceLabels({ relay, device: d, refresh }: { relay: string; device: Device; refresh: () => Promise<void> }) {
+	const [scope, setScope] = useState("device");
+	const naming = d.naming;
+	if (!naming) {
+		const modelName = d.source === "user" ? d.title : null;
+		const modelKind = d.source === "user" ? d.kind : null;
+		const legacyNaming = { model_title: d.title, model_name: modelName, model_kind: modelKind, instance_name: null, serial: null };
+		return <LabelForm key={JSON.stringify([d.id, modelName, modelKind])} device={d} naming={legacyNaming} refresh={refresh} />;
+	}
+	const portHint = !naming.serial ? `This name stays with USB ID ${d.id} at port ${d.busid}.` : undefined;
+	return (
+		<div className="flex flex-col items-start gap-2">
+			<Select value={scope} onValueChange={setScope}>
+				<SelectTrigger size="sm" aria-label="Name scope" title={scope === "device" ? portHint : undefined} className="w-44">
+					<SelectValue />
+				</SelectTrigger>
+				<SelectContent>
+					<SelectItem value="device">This device</SelectItem>
+					<SelectItem value="model">All of this model</SelectItem>
+				</SelectContent>
+			</Select>
+			{scope === "device" ? (
+				<DeviceNameForm key={JSON.stringify([d.id, naming.serial, naming.instance_name])} relay={relay} device={d} naming={naming} refresh={refresh} />
+			) : (
+				<LabelForm key={JSON.stringify([d.id, naming.model_name, naming.model_kind])} device={d} naming={naming} refresh={refresh} />
+			)}
+		</div>
+	);
+}
+
+function DeviceNameForm({
+	relay,
+	device: d,
+	naming,
+	refresh,
+}: { relay: string; device: Device; naming: NonNullable<Device["naming"]>; refresh: () => Promise<void> }) {
+	const [name, setName] = useState(naming.instance_name ?? "");
+	const [busy, setBusy] = useState(false);
+	const save = async (name?: string) => {
+		setBusy(true);
+		await act(
+			"device_name",
+			{ relay, device: d.id, busid: d.busid, serial: naming.serial, name },
+			name ? `${name} saved` : "Device name reset",
+			refresh,
+		);
+		setBusy(false);
+	};
+	return (
+		<form
+			onSubmit={(e) => {
+				e.preventDefault();
+				void save(name.trim() || undefined);
+			}}
+			className="flex flex-wrap items-center gap-2"
+		>
+			<InputText
+				value={name}
+				onChange={(e) => setName(e.target.value)}
+				placeholder={naming.model_title}
+				maxLength={60}
+				aria-label={`Name for this ${d.title}`}
+				className="w-56 max-w-full"
+			/>
+			<Button type="submit" size="sm" variant="secondary" disabled={busy || name.trim() === (naming.instance_name ?? "")}>
+				Save
+			</Button>
+			{naming.instance_name && (
+				<Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => save()}>
+					Reset device name
+				</Button>
+			)}
+		</form>
+	);
+}
+
+function LabelForm({
+	device: d,
+	naming,
+	refresh,
+}: { device: Device; naming: NonNullable<Device["naming"]>; refresh: () => Promise<void> }) {
+	const [name, setName] = useState(naming.model_name ?? "");
+	const [kind, setKind] = useState<Kind | "automatic">(naming.model_kind ?? "automatic");
 	const [busy, setBusy] = useState(false);
 	const save = async (body: object, done: string) => {
 		setBusy(true);
@@ -794,7 +1047,7 @@ function LabelForm({ device: d, refresh }: { device: Device; refresh: () => Prom
 	};
 	const submit = (e: FormEvent) => {
 		e.preventDefault();
-		save({ name: name.trim() || undefined, kind }, `${name.trim() || d.title} saved`);
+		save({ name: name.trim() || undefined, kind: kind === "automatic" ? undefined : kind }, "Model label saved");
 	};
 
 	return (
@@ -802,16 +1055,17 @@ function LabelForm({ device: d, refresh }: { device: Device; refresh: () => Prom
 			<InputText
 				value={name}
 				onChange={(e) => setName(e.target.value)}
-				placeholder={d.title}
+				placeholder={naming.model_title}
 				maxLength={60}
-				aria-label={`Name for ${d.title}`}
-				className="w-56"
+				aria-label={`Name for all devices with USB ID ${d.id}`}
+				className="w-56 max-w-full"
 			/>
-			<Select value={kind} onValueChange={(k) => setKind(k as Kind)}>
-				<SelectTrigger size="sm" aria-label={`Kind of ${d.title}`} className="w-44">
+			<Select value={kind} onValueChange={(k) => setKind(k as Kind | "automatic")}>
+				<SelectTrigger size="sm" aria-label={`Kind for all devices with USB ID ${d.id}`} className="w-44">
 					<SelectValue />
 				</SelectTrigger>
 				<SelectContent>
+					<SelectItem value="automatic">Detected kind</SelectItem>
 					{(Object.keys(KIND_LABEL) as Kind[]).map((k) => (
 						<SelectItem key={k} value={k}>
 							{KIND_LABEL[k]}
@@ -819,12 +1073,12 @@ function LabelForm({ device: d, refresh }: { device: Device; refresh: () => Prom
 					))}
 				</SelectContent>
 			</Select>
-			<Button type="submit" size="sm" variant="secondary" disabled={busy}>
-				Save
+			<Button type="submit" size="sm" variant="secondary" disabled={busy || (name.trim() === (naming.model_name ?? "") && kind === (naming.model_kind ?? "automatic"))}>
+				Save model label
 			</Button>
-			{d.source === "user" && (
-				<Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => save({}, "Back to what Plugover detects")}>
-					Reset
+			{(naming.model_name || naming.model_kind) && (
+				<Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => save({}, "Model label reset")}>
+					Reset model label
 				</Button>
 			)}
 		</form>
@@ -838,6 +1092,12 @@ function MissingRow({ relay, device: m, refresh }: { relay: Relay; device: Missi
 		await act("auto", { relay: relay.id, device: m.id, on: false, port: m.port ?? undefined }, `${m.title} removed`, refresh);
 		setBusy(false);
 	};
+	const reset = async () => {
+		if (!m.named) return;
+		setBusy(true);
+		await act("device_name", { relay: relay.id, device: m.id, busid: m.named.port, serial: m.named.serial }, "Device name reset", refresh);
+		setBusy(false);
+	};
 	return (
 		<div className="flex items-center gap-4 border-b border-border p-4 last:border-0">
 			<KindTile />
@@ -847,6 +1107,11 @@ function MissingRow({ relay, device: m, refresh }: { relay: Relay; device: Missi
 					{relay.online ? `Not plugged into ${relay.name}${m.port ? ` at port ${m.port}` : ""}` : "Waiting for the relay"}
 				</p>
 			</div>
+			{m.named && (
+				<Button type="button" size="sm" variant="ghost" disabled={busy} onClick={reset}>
+					Reset device name
+				</Button>
+			)}
 			<Switch checked disabled={busy} aria-label={`Use ${m.title} here`} onCheckedChange={off} />
 			{/* Where the details button sits in the other rows. */}
 			<div className="size-9 shrink-0" />

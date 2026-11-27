@@ -1,0 +1,14 @@
+status
+discover
+pair
+forget
+auto
+label
+device_name
+attach
+detach
+desktop
+unencrypted
+bt_scan
+bt_pair
+bt_forget

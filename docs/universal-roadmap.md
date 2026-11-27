@@ -1,64 +1,128 @@
-# Plugover as a universal device-forwarding companion: architecture and roadmap
+# Plugover architecture and roadmap
 
-Status: proposal, nothing implemented. Written 2026-11-14 against Plugover 0.6.0 (`ae19b98`).
+Current through Plugover 0.8.0 (`9373149`). See the README for installation and the compatibility
+matrix. The ecosystem survey at the end records what the original November 2026 design considered.
 
-## 1. Summary of decisions
+## 1. What ships
 
-1. **The core stays as it is.** Relay, host daemon, pairing, encryption and USB/IP attach do not
-   know about any streaming software today except in two places: the boolean `session` flag the
-   punktfunk plugin sets, and setup's punktfunk detection. Both get generalized; nothing is
-   rewritten.
-2. **"A stream is running" becomes a set of session sources with leases**, not one boolean. Each
-   integration (punktfunk, the GameStream adapter, a CLI call, a log watcher) holds its own lease.
-   Devices get a per-rule mode: `session`, `always` or `manual`.
-3. **One adapter covers every Sunshine-family host** (see Phase 2 for why it is a prep-command
-   hook and not the poll described here). Originally: every host
-   Moonlight can talk to must answer `GET /serverinfo` on its HTTP port, and Sunshine reports the
-   running app there (`currentgame`, `state`). That plus Sunshine's `global_prep_cmd` hook (do/undo)
-   gives a poll signal and a push signal without per-fork code. Fork differences live in a data
-   table (install paths, config file, service name, quirks), not in separate plugins.
-4. **Dedicated adapters only where the platform forces it:** punktfunk (has a plugin system, kept
-   as is), Wolf (sessions live in containers, devices must reach the right one), Parsec and Steam
-   Remote Play (no GameStream, only log or system-state signals; experimental).
-5. **Moonlight clients and forks need no integration.** The few that forward USB themselves
-   (Moonlight V+, Nightjar, MoonlightVibe, Moonlight Harmony) need coexistence checks, not adapters.
-6. **Native Bluetooth is HID-level forwarding, not radio forwarding.** The relay pairs devices
-   with BlueZ, reads and writes them through `hidraw`, and sends HID reports over a new encrypted
-   channel whose messages map one to one onto Linux `uhid`. A Linux host recreates the device with
-   `uhid` on `BUS_BLUETOOTH`, so the kernel and Steam see a real Bluetooth controller with no
-   translation. Windows hosts do not get this (Phase 5 was dropped); they use a USB Bluetooth
-   adapter on the relay, passed through as a USB device.
-7. **A standalone UI** served by the host daemon on loopback, reusing the existing React page, so
-   people without punktfunk get the same experience.
-8. **Compatibility is claimed only after a test on real hardware**, recorded in the README tables,
-   as today.
+| Area | Implementation |
+|---|---|
+| USB forwarding | The relay lends each device to one paired host at a time. The host reconciles attachments and uses Linux `vhci-hcd` or usbip-win2 on Windows. An explicit **Take over** request releases a device from its previous host and reserves it briefly for the requester. |
+| Stream sessions | Each source can hold a lease with an optional expiry. Devices in `auto` mode follow streams while a source is reporting them and stay connected otherwise. The other modes are `always` and `session`. Manual use is available through `attach` and `detach`. |
+| punktfunk and standalone UI | The punktfunk plugin reports streams and serves the React page in its console. `plugover ui` serves the same page via a one-time login code on loopback. Linux setup can grant attach permissions independently of punktfunk. |
+| Sunshine family | Setup merges a do/undo entry into each detected config's `global_prep_cmd`, keeps a backup, and removes its entry on uninstall. The commands report sessions and return success even if Plugover is unavailable. A loopback port check clears the lease if the app goes away without running undo. |
+| Parsec and Steam Remote Play | Experimental log watchers detect Parsec on Windows and Steam on Linux and Windows. A detected installation only affects `auto` mode after the watcher sees a stream. |
+| Bluetooth HID | Linux relays pair and read controllers through BlueZ and hidraw. Linux hosts recreate the devices with `uhid`. Windows hosts can use USB passthrough for a physical Bluetooth adapter. |
+| Device recovery in 0.8.0 | USB reconnect tracking uses serial numbers when the relay reports them on both sides of the reconnect, with a same-vendor and same-port fallback otherwise. Linux attach tries the next free vhci port if another process took the selected one. |
+| Linux gamescope routing in 0.8.0 | During a stream, the host forwards attached keyboard and mouse events into headless gamescope through libei and releases the device when the stream ends. The device setting can keep input on the desktop. Pads, wheels and joysticks continue to use their normal input paths. |
+| Windows punktfunk in 0.8.0 | The plugin connects to the host daemon over a local named pipe whose access list admits the plugin's AppContainer. |
 
-## 2. What exists today
+### Session and device ownership
 
-| Area | Where | Notes for this work |
-|---|---|---|
-| Relay: lends devices, pairing, snapshots | [src/relay.rs](../src/relay.rs) | Exclusive lending (`lent_to`) already arbitrates between several hosts. |
-| Host daemon: watches relays, reconciles attachments | [src/hostd.rs](../src/hostd.rs) | `session: AtomicBool` gates auto-connect; `Request::Session { active }` sets it. Recovery after drops and mode-switching wheels (`Track::follows`) is already here. |
-| Wire protocol | [src/proto.rs](../src/proto.rs) | Four-byte channel magics (`PLG1/2`, `PLC1/2`, `PLP2`). Host falls back from encrypted to old magics; the same pattern works for new channels. |
-| Host attach backends | [src/vhci.rs](../src/vhci.rs), [src/sysfs.rs](../src/sysfs.rs) | Linux: kernel `vhci-hcd` with socket hand-over. Windows: usbip-win2 attached to a loopback proxy, which is also the hook for synthesized devices later. |
-| Config | [src/state.rs](../src/state.rs) | `AutoRule { relay, device, title, port }`. Adding optional fields with serde defaults keeps old files valid. |
-| API types shared with the UI | [src/api.rs](../src/api.rs) | `Status.session: bool` is the one punktfunk-shaped field. |
-| punktfunk plugin | [plugin/src/index.ts](../plugin/src/index.ts) | Pushes `stream.started`/`stopped`, resyncs from `GET /status` every 10 s, serves the console page. |
-| Setup and detection | [src/setup/linux.rs](../src/setup/linux.rs), [src/setup/windows.rs](../src/setup/windows.rs), [src/setup/mod.rs](../src/setup/mod.rs) | `Found.punktfunk: bool` drives the role guess and the plugin step; detection is a probe of `punktfunk-host --version` or its install path. |
-| Device identity | [src/catalog.rs](../src/catalog.rs) | `Kind::Bluetooth` exists for USB dongles, and dongles are not blocked, so dongle passthrough should already work (untested). |
+The source name defaults to `punktfunk` for older clients. The host considers a stream active while
+at least one source has a lease. Hook commands and the CLI use the same daemon request as the
+plugin. On Windows the elevated Sunshine prep command uses the token-protected loopback API.
+Automatic rules match a relay and model, optionally pinned to one relay port. Sources are remembered
+globally to preserve `auto` behavior during a daemon restart.
+[`src/hostd.rs`](../src/hostd.rs) · [`src/state.rs`](../src/state.rs) · [`src/ui.rs`](../src/ui.rs)
 
-Coupling to punktfunk, complete list: the plugin, `Found.punktfunk` and the plugin install and
-remove steps, joining the `punktfunk` group (its udev rule makes `vhci_hcd/attach` writable), and
-user-facing strings. Everything else is platform independent already.
+Sunshine's hook follows the lifetime of the app. Forks can hide the running app from unpaired
+`/serverinfo` callers, so the port probe checks liveness and the prep commands provide stream
+state. Linux detection looks for the native Sunshine, Apollo, Vibeshine, Polaris and Hermes config
+paths and the installed Sunshine Flatpak. Windows detection looks for
+`Program Files\<app>\config\sunshine.conf`. The shared hook is usable with forks that keep this
+config format. Real-stream verification is tracked separately for each app and platform.
+[`src/sunshine.rs`](../src/sunshine.rs) · [`src/follow.rs`](../src/follow.rs)
 
-## 3. Ecosystem findings
+### Bluetooth HID on Linux
 
-Checked on 2026-11-14 from repositories, docs and, where marked, source code. "Base" is what the
-project says it derives from. Nothing below has been tested with Plugover.
+A relay exposes paired Bluetooth HID devices as `bt-<address>` entries. It lends them through
+the encrypted `PLH1` channel, supporting input, output, and feature reports, and grabs accessible
+evdev input nodes while the lend is active. The host creates a `BUS_BLUETOOTH` device with the
+original descriptor and identifiers. The Bluetooth path shares the relay's exclusive lending,
+share list, unpairing and take-over behavior with USB. Scan, pair and forget are available through
+the relay CLI and the page using `PLR1`. Host setup grants access to `/dev/uhid`.
+[`src/bluetooth.rs`](../src/bluetooth.rs) · [`src/hid.rs`](../src/hid.rs) · [`src/relay.rs`](../src/relay.rs) ·
+[Linux UHID documentation](https://www.kernel.org/doc/html/latest/hid/uhid.html)
 
-### 3.1 Hosts
+### Bluetooth adapter on a Windows host
 
-| Host | Exists, maintained | Base | Host OS | Session signal available | Own USB forwarding | Plan |
+Plug a USB Bluetooth adapter into the relay and attach the **adapter** to Windows through
+Plugover. Pair the controller from Windows Bluetooth settings while the adapter is attached. The
+radio remains beside the controller, and Windows owns the radio and the pairing. Choose **Always**
+if Windows should keep the radio between streams. The relay can lend that adapter to one host at a
+time. This uses the existing USB path. Adapter and controller compatibility still needs a
+real-hardware run for the README matrix.
+[Plugover Bluetooth instructions](../README.md#bluetooth-controllers) ·
+[Microsoft's Bluetooth pairing instructions](https://support.microsoft.com/en-us/windows/pair-a-bluetooth-device-in-windows-2be7b51f-6ae9-b757-a3b9-95ee40c3e242)
+
+## 2. Verification and reliability
+
+Use the README for hardware claims. Test end to end with a relay, a host, and the relevant
+streaming app. Record the OS versions, app versions, device and transport, along with which
+features worked. Include a force-feedback wheel in the USB release checks when hardware is
+available.
+
+| Area | Evidence and remaining work |
+|---|---|
+| USB | The README records Linux x86_64 relay and host, Windows host, and Logitech G29 tests. Verify the 0.8.0 Windows relay and an ARM relay. Exercise take-over between real hosts and check G29 mode switches with reported serials. |
+| Sunshine | A native Linux Sunshine 2026.914 stream started and stopped Plugover, and killing Sunshine ended the session through the port check. The Flatpak hook worked when run from its sandbox. The real launch stalled at the Wayland portal before reaching the hook. Verify a Flatpak stream, Windows elevation and the fork configs people use. |
+| Parsec and Steam | Unit fixtures cover log parsing and truncation. A test daemon followed a hand-written Steam log. Capture actual connect, disconnect and crash behavior before marking either integration tested. Cover late-created and replaced logs, and clear stale leases when a watcher loses its log. |
+| Linux Bluetooth | A same-machine test with two real DualShock 4s verified input, feature reports, rumble, light bar, and relay input grabs. The test build changed the virtual device address to avoid a local duplicate-address check. Verify unchanged identity across two machines, pairing from discovery to first input, reconnect, and additional controller models. |
+| gamescope | Verified with virtual devices and punktfunk's gamescope 3.17. Verify in a real dedicated stream, including attachment, input, desktop opt-out, and cleanup after gamescope exits. Multi-user punktfunk seats remain outside this routing path. |
+
+Automated checks cover session leases and compatibility with older plugin requests, device modes,
+serial-aware reconnects, Sunshine config merging, log parsing, relay take-over, HID frame limits,
+and gamescope input classification and routing. CI runs Linux tests, TypeScript checks, and
+cross-target Clippy for Windows and musl. The live gamescope test is opt-in.
+[CI workflow](../.github/workflows/ci.yml) · [Gamescope tests](../src/route.rs)
+
+Gather evidence before adding aggressive USB reset recovery or foreign USB/IP ownership
+diagnostics. Relay startup and failed attaches already attempt to release leftover exports.
+A useful next diagnostic would identify whether a port is occupied by Plugover or another tool
+on affected hosts. Keep the current slot ownership rules when investigating.
+[`src/relay.rs`](../src/relay.rs) · [`src/doctor.rs`](../src/doctor.rs)
+
+## 3. Research milestone for Bluetooth HID on Windows hosts
+
+The synthetic USB design was dropped in November 2026 because it required per-model report
+translation. Research whether Microsoft's Virtual HID Framework (VHF) can expose a controller
+paired to the Linux relay as a usable virtual HID device on Windows. VHF requires a kernel-mode
+source driver. Steam Input and game compatibility need a hardware test.
+[Microsoft VHF overview](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/virtual-hid-framework--vhf-)
+
+1. **Prove the host path.** Build a minimal WDK driver and verify generic HID enumeration,
+   bidirectional reports, and removal. Restrict driver access to the host service. Keep relay
+   networking and report validation in user space.
+2. **Test a DualShock 4.** Reuse `PLH1` from the Linux relay. Check input, rumble, and feature
+   reports in Windows and Steam Input, compare with direct Windows pairing, and verify teardown
+   on detach, relay loss, and service restart.
+3. **Decide whether to ship.** Require useful bidirectional reports without per-model
+   translation, reliable cleanup, and a maintainable Microsoft-signed package that installs
+   with Secure Boot enabled.
+   [Microsoft driver signing options](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/driver-signing-offerings)
+
+## 4. Deferred integrations
+
+- **Wolf** was dropped after a prototype. Watching its Unix socket required access changes, and
+  games in Docker need hotplug support inside their own containers. Reconsider when the
+  integration has a supported way to place devices in the correct container.
+- **Other Sunshine-compatible servers** need a documented start/stop signal and a real test.
+  Moonshine and Rubylight are candidates if their host APIs provide that signal.
+- **Other USB-forwarding tools** can share the Windows vhci driver. Check coexistence on actual
+  installations before identifying foreign attachments in `doctor`. Moonlight client adapters
+  are outside the current scope.
+- **Per-source and per-serial rules** are candidates when a real setup needs them. The current
+  configuration already supports multiple session sources and optional per-port rules.
+
+## 5. Ecosystem survey from the original proposal
+
+Reviewed 2026-11-14 from repositories, docs and source. The table records the original proposals
+and the findings at that date. Sections 1–4 describe what ultimately shipped and what is still open.
+
+### Hosts
+
+| Host | Exists, maintained | Base | Host OS | Session signal available | Own USB forwarding | Original proposal |
 |---|---|---|---|---|---|---|
 | Sunshine (SunshineStream/Sunshine, formerly LizardByte) | Yes, active | | Win, Linux, macOS | `/serverinfo` `currentgame`/`state` (read in `src/nvhttp.cpp`); `global_prep_cmd` do/undo (read in `src/config.cpp`); REST API has no session endpoint | No | GameStream adapter |
 | Apollo (ClassicOldSong) | Yes | Sunshine | Windows | Same, plus per-client connect/disconnect commands and pause/resume commands | No | GameStream adapter, prefer client commands where configured |
@@ -76,7 +140,7 @@ project says it derives from. Nothing below has been tested with Plugover.
 | Steam Remote Play | Yes | Valve | Win, Linux, macOS | No API. `logs/streaming_log.txt`; on Linux the `steam-streaming-playback` PipeWire sink exists only during a session | No | Experimental watcher, Linux sink first |
 | Parsec | Yes | Proprietary | Host on Windows, macOS | `log.txt` lines ending `" connected."` / `"disconnected."` per user; stale after a crash unless the process is checked | No | Experimental log watcher |
 
-### 3.2 Clients
+### Clients
 
 Moonlight, Artemis, Artemide, Moonlight V+, Starwire, StreamLight, Nova (Polaris's client),
 Hestia (Hermes's client) and Nightjar (Rubylight's client) all exist. None needs an integration:
@@ -106,449 +170,7 @@ today, to Windows hosts. Plugover's advantages are a dedicated relay that stays 
 streams, Linux hosts, any streaming software, and kernel-side data paths. Interoperating with the
 V+ tunnel (accepting it on Linux hosts) is possible later but not planned.
 
-## 4. Architecture
-
-### 4.1 Layers
-
-```
-            ┌────────────── host machine ──────────────────────────────────┐
- relay ───► │ core: relay links, attach backends (vhci / usbip-win2 / uhid)│
- (USB, BT)  │       reconcile loop, rules, history                         │
-            │            ▲ session leases                                  │
-            │ integrations: punktfunk plugin │ GameStream │ Wolf │ CLI    │
-            │               Parsec/Steam watchers (experimental)           │
-            │ UI: punktfunk console page │ standalone loopback page │ CLI │
-            └──────────────────────────────────────────────────────────────┘
-```
-
-Rule: integrations only produce session leases and, for Wolf, device placement hints. They never
-attach or detach devices themselves. The core never imports integration code; integrations talk to
-it through the same `Request` API the CLI uses.
-
-### 4.2 Session model
-
-Replace `session: AtomicBool` with a lease table in `Daemon`:
-
-```rust
-struct Lease { source: String, client: Option<String>, until: Option<Instant> }
-sessions: Mutex<HashMap<String /* source id */, Lease>>
-```
-
-- `Request::Session { active, source, client, ttl }`, all new fields `#[serde(default)]`. A missing
-  `source` means `"punktfunk"`, so today's plugin keeps working against a new daemon. A new plugin
-  talking to an old daemon is also fine: serde ignores unknown fields on that variant.
-- Push sources (plugin, prep commands, CLI) may send `ttl`; pollers refresh their own lease.
-  A lease that expires counts as ended, which covers a crashed host app that never ran its undo.
-- "Session active" = any unexpired lease. Hand-detached devices stay held until all leases end,
-  as `held` does today.
-- `AutoRule` gains `mode: session | always | manual` (default `session`, matching today) and
-  optional `sources: Vec<String>` to scope a rule ("only while Sunshine streams"). `always`
-  attaches whenever the relay is online. `manual` is today's `attach`/`detach`.
-- `api::Status.session: bool` stays for the current UI and gains `sessions: Vec<SessionStatus>`.
-
-This is the only change the core needs for "standalone operation", and it is small: the reconcile
-loop already does the rest.
-
-### 4.3 The integration layer
-
-One module, `src/integrations/`, with one file per adapter kind and a data table:
-
-| Adapter | Signal | Hosts |
-|---|---|---|
-| `punktfunk` | plugin pushes (unchanged), install/remove moves here from setup | punktfunk |
-| `gamestream` | poll `http://127.0.0.1:<port>/serverinfo` every 2 s for `currentgame != 0`; optional push through `global_prep_cmd` (`plugover session start --source sunshine` / `stop`) | Sunshine and every fork, Moonshine, Hermes, Polaris, SolarFlare, Rubylight (to verify) |
-| `wolf` | Wolf API on its Unix socket: session start/stop events with the client and container | Wolf |
-| `parsec` | tail `log.txt`, track connected users, confirm the host process is alive | Parsec (experimental) |
-| `steam` | Linux: presence of the `steam-streaming-playback` PipeWire sink; Windows: `streaming_log.txt` (strings to be found) | Steam Remote Play (experimental) |
-
-The GameStream fork table is data, roughly:
-
-```toml
-[[gamestream]]
-id = "apollo"
-name = "Apollo"
-linux = { bins = [], units = [] }
-windows = { dirs = ['%ProgramFiles%\Apollo'], service = "ApolloService" }
-config = { windows = 'config\sunshine.conf' }
-client_commands = true      # per-client connect/disconnect commands exist
-own_usb_forwarding = false
-```
-
-Every value in that table is to be confirmed on a real install before it ships. Behavior is
-decided by probing (does `/serverinfo` answer, which port, does `currentgame` change when a stream
-starts) rather than by trusting the fork name, because forks look alike from outside.
-
-Signals, and why polling is the default:
-
-- `currentgame` means "an app is running", not "a client is connected". A Sunshine app can keep
-  running after the client leaves. That matches what people want for a wheel (keep it while the
-  game runs) and is reliable across forks. Apollo's pause commands can tighten it later.
-- `global_prep_cmd` only applies to apps that do not set `exclude-global-prep-cmd`, does not get
-  client variables, and needs a host app restart after editing. It is the fast path (no 2 s poll
-  delay), not the only one.
-- Polling `/serverinfo` on loopback is unauthenticated and needs no stored credentials. The REST
-  API would need the admin password, which Plugover should never store.
-
-### 4.4 Detection and guided setup
-
-`setup::Found.punktfunk: bool` becomes `Found.apps: Vec<Detected { id, name, version, how }>`.
-Detection per OS: binaries on `PATH`, systemd system and user units, Flatpak ids
-(`dev.lizardbyte.app.Sunshine`), Docker containers (`wolf`), Windows uninstall registry keys,
-services and install folders, and finally a `/serverinfo` probe on 47989 for anything unknown
-that speaks GameStream.
-
-Setup then shows one line per detected app, as it does for punktfunk now:
-
-- punktfunk: unchanged steps (plugin, group).
-- GameStream hosts: "Follow streams from Apollo" (poll, nothing to change) and, as a separate
-  opt-in, "Add Plugover to Apollo's global prep commands" with the exact diff, a backup of the
-  config file, merging with existing entries, and a note that the host app needs a restart.
-  Flatpak Sunshine needs `flatpak-spawn --host plugover …` in the command.
-- Wolf: mount instructions or an automatic compose snippet, shown, not applied silently.
-- Parsec, Steam: "experimental" lines, off unless chosen.
-- Nothing detected: host role still installs; rules default to `always` and the standalone UI is
-  the place to manage it.
-
-The role guess (`found.punktfunk || found.host`) becomes "any streaming host detected".
-
-### 4.5 Standalone UI
-
-The console page (`plugin/ui`) already talks to the daemon through `/api/<op>`. Serve the same
-built page from the host daemon on `127.0.0.1` with a per-start token, opened by `plugover ui`.
-That needs a minimal HTTP responder for static files and JSON POST (standard library is enough).
-The punktfunk page keeps working through the plugin. One UI codebase, two hosts for it.
-
-### 4.6 Coexistence with hosts that forward USB themselves
-
-Foundation Sunshine, Rubylight and the client forks attach through the same usbip-win2 driver on
-Windows. Physical devices cannot be in two places, so real conflicts are limited to driver
-versions and vhci port exhaustion. `plugover doctor` reports when such a feature is enabled and
-lists foreign attachments, so people know which tool owns which device. Plugover only ever
-detaches attachments it made, which it already tracks by slot.
-
-### 4.7 Multiple environments
-
-- **Several streaming apps on one host**: the lease table unions them; `sources` scopes rules.
-- **Several hosts sharing one relay**: the relay already lends each device to one host at a time.
-  Add an explicit "take over" request on the relay (a host asks; the relay releases the other
-  host's lease after telling it), so switching PCs does not require walking to the other one.
-  Default stays first come, first served.
-- **Several clients on one host (Wolf)**: devices follow the session the rule names; the Wolf
-  adapter tells the core which container gets which device. This is the one place where an
-  integration influences placement, and the reason Wolf gets its own adapter.
-
-### 4.8 Reliability and recovery
-
-Already present: relay reconnects with mDNS rediscovery, re-attach after drops, following wheels
-that change product id. Additions, in order of value:
-
-1. Match the follow logic on USB serial number when the device has one (the existing `ponytail:`
-   note in `hostd.rs`).
-2. Relay-side recovery for a device stuck in the export state: unbind, `authorized` toggle,
-   rebind, with a bounded retry count, surfaced in history.
-3. Lease expiry (4.2) so a crashed streaming app never pins devices forever.
-4. Bluetooth reconnection handled by the same reconcile loop (4.9): a device that comes back is
-   just another snapshot entry.
-
-### 4.9 Native Bluetooth
-
-#### Goals and non-goals
-
-Goals: pair controllers and other HID devices directly with the relay, forward them to Linux and
-Windows hosts with rumble, LEDs, motion sensors, touchpads, adaptive triggers and vendor feature
-reports, reconnect automatically, and keep latency at one network round trip over native.
-
-Non-goals: forwarding the Bluetooth radio itself (only possible by passing a dongle through, which
-stays available as USB passthrough); Bluetooth audio (A2DP/HFP); DualSense voice-coil "HD
-haptics", which over USB are an audio stream and over Bluetooth are not exposed to the HID layer
-in a way Plugover can forward (rumble emulation still works).
-
-#### Why HID level
-
-| Option | Verdict |
-|---|---|
-| Pass a USB Bluetooth dongle through | Works with no new code, but the host's Bluetooth stack does everything, the radio sits on the relay only by accident, and pairing must happen from the host. Keep it as a supported extra. |
-| Forward raw L2CAP/HCI | Needs Plugover to own the Bluetooth host stack on both ends. Large, fragile, no gain. |
-| **Forward HID reports** | Every target device class is HID (classic HID or HID over GATT). Reports are small (≤ 78 bytes for a DualSense), the semantics are standard, and both host OSes can recreate a HID device. Chosen. |
-
-#### Relay side (Linux first)
-
-- **Pairing** through BlueZ over D-Bus: `Adapter1.StartDiscovery` with a filter, `Device1.Pair`,
-  `Trusted = true`, `Connect`, and an `Agent1` with capability `KeyboardDisplay` so passkeys and
-  confirmations reach the UI. This needs a D-Bus client; `zbus` (pure Rust, blocking API) is the
-  one new dependency this plan adds. Shelling out to `bluetoothctl` is not robust enough for
-  pairing prompts.
-- **Data tap through `hidraw`.** BlueZ defaults to `UserspaceHID=true` for classic HID and always
-  uses `uhid` for HID over GATT, so every paired HID device appears as a `hidraw` node with a
-  `HIDIOCGRDESC` descriptor, `HIDIOCGRAWINFO` (bus, vendor, product), and `HIDIOCGFEATURE`,
-  `HIDIOCSFEATURE`, `HIDIOCGINPUT`, `HIDIOCGOUTPUT` for report requests. One code path for BR/EDR
-  and BLE.
-- **Relay-local drivers are unbound** from forwarded devices (bound to `hid-generic`) so the
-  relay's `hid-playstation` or `hid-nintendo` do not send their own LED or mode commands while the
-  host's driver does. Same sysfs approach as `usbip-host` binding today.
-- **Snapshot entries**: a Bluetooth device appears in the relay snapshot with busid
-  `bt-<address>`, its vendor:product, and `transport: "bluetooth"`. Existing `AutoRule`s work
-  unchanged: the address is the "port".
-
-#### Wire protocol
-
-A new channel, `PLH1`, encrypted from the start with the existing challenge and `tls` records
-(no unencrypted variant: there are no old peers to support). Binary frames
-`[type u8][len u16][payload]`, chosen to map one to one onto Linux `uhid` events:
-
-| Frame | Direction | uhid | Relay action |
-|---|---|---|---|
-| `CREATE` (name, uniq, bus, vid, pid, version, country, descriptor) | relay → host | `UHID_CREATE2` | from `hidraw` info |
-| `INPUT` | relay → host | `UHID_INPUT2` | each `hidraw` read |
-| `OUTPUT` | host → relay | `UHID_OUTPUT` | `hidraw` write |
-| `GET_REPORT` / `GET_REPORT_REPLY` (id, type, number) | both | `UHID_GET_REPORT(_REPLY)` | `HIDIOCG*` |
-| `SET_REPORT` / `SET_REPORT_REPLY` | both | `UHID_SET_REPORT(_REPLY)` | `HIDIOCSFEATURE` / output |
-| `GONE` | relay → host | `UHID_DESTROY` | device disconnected |
-
-The control channel learns two things: Bluetooth devices in snapshots, and relay requests from the
-host (`bt_scan`, `bt_pair`, `bt_confirm`, `bt_forget`, `take_over`). A 0.6 relay stops answering
-pings when it reads a line it does not understand, so these go on a new control magic `PLC3`, with
-the host falling back to `PLC2` exactly as it falls back from `PLC2` to `PLC1` today. Only `PLC3`
-hosts see Bluetooth devices, so an old host never tries to USB/IP-attach a `bt-` busid.
-
-#### Linux host
-
-Write `CREATE` to `/dev/uhid` with the original bus (`BUS_BLUETOOTH`), vendor, product and
-descriptor. The host kernel then binds the same driver it would for a locally paired controller
-(`hid-playstation` checks `hdev->bus == BUS_BLUETOOTH` for report formats and CRCs, confirmed in
-the source), and Steam and SDL see a Bluetooth controller through `hidraw`. No translation, full
-feature parity by construction, including adaptive triggers and motion. Requires `/dev/uhid`
-access: setup adds a udev rule for the Plugover user, the same way it handles `vhci_hcd` now.
-
-#### Windows host (dropped with Phase 5; kept for the record)
-
-Windows has no user-mode `uhid`; its virtual HID framework is kernel mode and would need a signed
-driver. Instead, the host daemon synthesizes a **USB HID device** and serves it on the loopback
-USB/IP proxy that `vhci.rs` already uses for usbip-win2:
-
-- Full-speed device, one HID interface, interrupt IN with `bInterval = 1`, interrupt OUT, the
-  forwarded report descriptor, `GET_REPORT`/`SET_REPORT`/`SET_IDLE` on endpoint 0.
-- **Generic profile** (keyboards, mice, most gamepads, joysticks): descriptor and reports passed
-  through unchanged. HID is transport independent for these.
-- **Translation profiles**, only for devices whose Windows drivers and games branch on transport.
-  Each is a small, tested table of report-format conversions:
-  - DualSense: present as USB `054c:0ce6`; input `0x31` (BT) to `0x01` (USB) by dropping the
-    sequence byte and CRC; output `0x02` (USB) to `0x31` with sequence tag and CRC32 seeded with
-    `0xA2`. Adaptive trigger and LED payloads are identical between the two.
-  - DualShock 4: same pattern with `0x11` and calibration feature report `0x05`/`0x02`.
-  - Switch Pro: answer the USB `0x80` handshake locally, then pass `0x30` reports, which are the
-    same on both transports.
-  - Xbox Wireless (BLE HID): first try presenting the original HID device and check whether
-    Windows binds its Xbox HID driver; if not, present an Xbox 360 wired device (`045e:028e`,
-    vendor class) with rumble mapped. Impulse trigger rumble may be lost in the fallback. Needs a
-    real test before any claim.
-- The same synthesized-USB path also works on Linux, as a fallback for software that only accepts
-  USB controllers.
-
-#### Relay on Windows
-
-Later and experimental: read paired HID devices through the Win32 HID API (descriptor
-reconstructed from preparsed data, as hidapi does), pair through WinRT `DeviceInformation.Pairing`.
-Windows gives no exclusive access, so the relay's own games would also see the device. A Linux
-relay (Raspberry Pi or any box) is the recommended setup.
-
-#### Latency and radio
-
-Bluetooth HID reports arrive every 1 to 8 ms depending on the device; Plugover adds one TCP hop
-with `TCP_NODELAY` (already set by `net::tune`), so a wired LAN adds well under a millisecond.
-Raspberry Pi onboard Bluetooth shares its antenna with Wi-Fi: recommend Ethernet on the relay, or a
-USB Bluetooth 5 adapter. Classic Bluetooth allows seven active devices per adapter.
-
-#### Device switching
-
-A controller bonded to the relay stays bonded there; switching which gaming PC uses it is the
-relay "take over" from 4.7, with no re-pairing. Moving it back to a console or phone means
-pairing there again, which most controllers remember for one host at a time. The UI says so.
-
-### 4.10 Security
-
-- New channels use the existing pairing key, challenge and AES-GCM records. No new trust roots.
-- Relay requests from hosts (`bt_pair`, `take_over`) are allowed only for paired hosts, and the
-  relay may restrict them (`plugover share` gains a Bluetooth equivalent).
-- Session leases from prep commands on Windows: Sunshine-family hosts run prep commands as the
-  logged-in user, who cannot read the daemon's API token today. Add a second, narrower token that
-  only permits `Session`, readable by local users, rather than loosening the main one. Worst case
-  for an attacker with it: devices the owner already chose connect.
-- The standalone UI listens on loopback only, with a token per daemon start.
-- Prep-command edits to another app's config are shown before applying, backed up, and never made
-  without consent.
-
-## 5. Roadmap
-
-Each phase ships on its own and keeps punktfunk behavior identical. "Done" means tested on real
-hardware and recorded in the README compatibility tables.
-
-**Phase 0: groundwork, no behavior change** (done in the working tree, not released)
-- Lease table with `source` defaulting to `punktfunk` and an optional `ttl`; `Status.sessions`;
-  `plugover status` and `doctor` name the sources. The hidden `plugover session` command uses the
-  source `cli`.
-- Tests: a 0.6 plugin request still sets punktfunk's lease; leases from two sources combine; an
-  unrenewed lease ends the stream.
-- Moved to Phase 2: punktfunk detection and plugin steps into `src/integrations/` and
-  `Found.apps`. That code is woven into the per-OS setup (one PowerShell detection script on
-  Windows), so moving it before a second integration exists would be churn without a shape to
-  move it to.
-- Not yet verified with a running punktfunk host.
-
-**Phase 1: standalone operation** (done in the working tree, not released)
-- Per-rule `mode = auto | always | session`. `auto`, the default, connects only during streams
-  while a source reports them (one spoke within 60 s, or, for 60 s after a restart, one did
-  before; sources are remembered in host.toml), and always otherwise. `manual` is just no rule
-  plus `plugover attach`. Hand-attached devices stay until detached or a stream ends.
-- `plugover session start|stop --source <id> [--ttl]` is public.
-- `plugover ui`: the daemon serves the console page on 127.0.0.1:7277. A one-time code from the
-  daemon API buys an HttpOnly, SameSite=Strict cookie; Host, Origin and Sec-Fetch-Site are checked;
-  the page can only use the ops the punktfunk plugin allows.
-- Moved to Phase 2: `sources` scoping on rules and the Windows session-only token, which only
-  matter once a second source exists.
-- A host.toml from 0.6 with rules counts punktfunk as a remembered source, so upgrading does not
-  connect auto devices outside a stream while the plugin has not reported yet.
-- Not yet verified: with a real relay and wheel (always mode, mode changes in the page), on
-  Windows (`plugover ui` there needs administrator rights like the other host commands).
-
-**Phase 2: Sunshine-family adapter** (done in the working tree, not released)
-- Correction to 4.3, from reading each fork's `nvhttp.cpp`: over plain HTTP, Apollo, Hermes and
-  Polaris always report `currentgame = 0` (only paired HTTPS clients see the game), and Vibeshine
-  decides per caller. Only official and Foundation Sunshine answer it. So there is no poller; the
-  shared mechanism is the `global_prep_cmd` hook, which every fork keeps (`list_prep_cmd_f`).
-- Sunshine aborts the launch when a do-command fails (`process.cpp`), so the hook runs
-  `plugover session start --hook`, which never fails.
-- `src/sunshine.rs` finds configs by file: `~/.config/{sunshine,apollo,vibeshine,polaris,hermes}/`
-  (each fork's own file name, checked in source: `polaris.conf`, `hermes.conf`, `vibeshine.conf`,
-  `sunshine.conf`), the Sunshine Flatpak (`flatpak-spawn --host`), and on Windows any
-  `Program Files\<app>\config\sunshine.conf` (elevated command, so it may read the daemon token).
-  It merges one entry into `global_prep_cmd`, keeps a copy of the file before the first change,
-  and removes the entry on uninstall.
-- The hook passes the app's `port`. The daemon remembers it (`[watch]` in host.toml), counts the
-  source as watching while the port answers, and ends its stream after three missed checks 5 s
-  apart, for an app that crashed without running its undo command.
-- Setup lists found apps, adds the hook as a planned step and announces it to the daemon; doctor
-  says which configs are followed.
-- Verified: unit tests for config merging; the real hook commands against a test daemon with a
-  stand-in listener (start, stop, staying watched for 70 s, crash ending the stream within 17 s,
-  exit 0 with the daemon down). Not verified: any real Sunshine-family app, Windows, the Flatpak.
-- Tried 2026-11-15 with Sunshine's Flatpak (2026.914) and Moonlight 6.2 on KDE Plasma Wayland with
-  NVIDIA: Moonlight paired and Sunshine found the hook (doctor too), and the hook's command, run with
-  `flatpak-spawn --host` from inside the Sunshine sandbox, started and ended a session. A real
-  launch never reached the prep commands: Sunshine probes encoders first, and its second XDG portal
-  session (`RemoteDesktop CreateSession`) got no answer, so the launch hung. KMS capture is not
-  available to the Flatpak.
-- Verified 2026-11-15 with a native Sunshine (AUR `sunshine-bin` 2026.914, KMS capture with
-  `cap_sys_admin`) and native Moonlight 6.2 on this machine: launching Desktop ran the do-command
-  and the daemon's session started; quitting the app ran the undo-command and it ended; killing
-  Sunshine mid-stream ended it 14 s later through the port probe.
-- Not covered: Moonshine and Wolf (no prep commands), Rubylight (Rust rewrite; its API not read).
-
-**Phase 3: reliability** (take-over done in the working tree, not released)
-- Done: "take over". A new request channel (`PLR1`, encrypted after the challenge; older relays
-  hang up and the host says to update) carries `take`. The relay revokes the other host's lend
-  through the same path as unpairing, waits until it is back, and keeps the device for the taking
-  host for 15 s (shown as that host's in snapshots, refused to others). `plugover attach --take`
-  and a **Take over** button. Tested with two hosts against a real relay in `cargo test`; not with
-  real hardware.
-- Not done, on purpose: the serial-number guard on following. If a wheel changes its serial when it
-  switches modes, the guard would stop the G29 following that works today; check on hardware first.
-  Relay stuck-device recovery waits for a real report of a stuck device.
-- Also from Phase 1 and 2: `sources` scoping on rules, and a narrower Windows token if elevated
-  prep commands turn out not to reach the daemon.
-- Serial-number following, relay stuck-device recovery, relay "take over" request, doctor checks
-  for foreign USB forwarding.
-
-**Phase 4: Bluetooth on Linux relay and Linux host** (forwarding done in the working tree)
-- Done: `src/hid.rs`. The relay lists Bluetooth HID devices from sysfs (`HID_ID` bus 0005,
-  `HID_UNIQ`, `report_descriptor`), lends one over `PLH1` (busid as an encrypted JSON line, tag over
-  the busid, then frames that map onto uhid events), reads and writes it through hidraw, and answers
-  report requests with the HIDIOC[GS]{FEATURE,INPUT,OUTPUT} ioctls. Hosts on Linux open the control
-  channel as `PLC3` to see Bluetooth devices (older relays hang up; the host falls back). The host
-  recreates the device with `UHID_CREATE2` on `BUS_BLUETOOTH`; detaching closes it. Lends share
-  the relay's exclusivity, share list, unpairing and take-over with USB devices. Host setup adds a
-  `uaccess` udev rule for /dev/uhid when needed; doctor checks it.
-- Verified on this machine with a simulated Bluetooth gamepad made with uhid (a Valve vendor id, so
-  the Steam udev rule let an unprivileged test relay open it): the host's copy appeared on bus 0005
-  with the same ids and name, input reports streamed, an output report and a feature request reached
-  the device, and detaching removed the copy.
-- Verified 2026-11-15 with two real DualShock 4s (054c:09cc) over Bluetooth, a test relay and a test
-  host on one machine: hid-playstation on the host bound the copy and read the pad's firmware and
-  hardware versions through Plugover (feature reports); buttons, sticks, touchpad and motion
-  sensors reached the copy (about 2000, 180 and 12000 events in 15 s); rumble sent through the
-  copy's force feedback made the pad vibrate and the copy's driver set the light bar red, both
-  confirmed by hand (output reports); the relay held the original's input node (EVIOCGRAB, another
-  grab got EBUSY). On one machine hid-playstation refuses a second DS4 with the same MAC
-  ("Duplicate device found"), so this test used a build whose copy got a changed MAC; across two
-  machines the MAC stays as it is. One pad at 5 % battery dropped its Bluetooth link twice;
-  Plugover saw it go and come back. Not verified: two machines, DualSense, Switch Pro, Xbox,
-  latency, long sessions.
-- Pairing (src/bluetooth.rs, `zbus` 6 with its own async runtime, driven through
-  `zbus::block_on`): scan, pair (registers an `Agent1` with `NoInputNoOutput`: Simple Pairing
-  then needs no code, and a legacy keyboard asking for a PIN gets 0000), trust, connect, forget. On the relay with `plugover bluetooth`, and
-  from the page through new `PLR1` requests (`bt_scan`, `bt_pair`, `bt_forget`) whose reply lists
-  what BlueZ knows. Controllers paired by cable (DualShock 4, DualSense through BlueZ's sixaxis
-  plugin) have no icon or class, so `CablePairing` also counts as an input device and as paired.
-  Verified: a scan from the page through a test host and relay found the real DualShock 4 the
-  relay knows. Not verified: pairing a controller in pairing mode end to end.
-- The relay keeps its own driver bound, so a relay that is also a desktop sees the controller too.
-- `zbus` pairing with agent, `hidraw` tap, `PLC3` and `PLH1`, `uhid` on the host, UI and CLI
-  (`plugover bt scan|pair|forget`).
-- Test devices: DualSense (rumble, triggers, motion, touchpad), DualShock 4, Switch Pro, Xbox
-  Wireless, a BT keyboard with passkey pairing.
-
-**Phase 5: Bluetooth to Windows hosts** (dropped, 2026-11-15)
-- Was: a synthesized USB HID device on the loopback USB/IP proxy, a generic profile, then
-  translation profiles one device at a time. Dropped because it is a large amount of per-model code
-  for little gain: streaming clients already forward pads, and a USB Bluetooth adapter on the relay,
-  passed through as a USB device, gives a Windows host full Bluetooth with no new code. Linux to
-  Linux Bluetooth stays, experimental, and goes too if real controllers show it is not worth it.
-
-**Phase 6: dedicated adapters** (sessions done in the working tree, not released)
-- Done: `src/follow.rs`, polled by the host daemon every 5 s next to the hooked apps' ports. Parsec
-  (Windows): `log.txt` in
-  ProgramData or any user's AppData (the daemon runs as SYSTEM), counting `name#id connected.` and
-  `disconnected.`, cleared by `===== Parsec: Started =====` and when `parsecd.exe` no longer runs.
-  Steam Remote Play: `streaming_log.txt`, started by `Streaming started to`, ended by `PipeWire:
-  Deinitializing streaming` (Linux) or `Encoding complete` (Windows), both as SpoutRemotePlayHost
-  documents them, or when Steam no longer runs. A log that shrank starts over.
-- Unlike the plan above, they are on without being chosen, but being installed does not make a host
-  "watching": only a stream seen here does, after which the app keeps it watching while it can be
-  asked. Steam is on almost every gaming PC, so mere presence would change what auto means.
-- Verified: unit tests with real log lines from others; the daemon
-  followed a hand-written Steam log (start and end) on this machine; doctor lists what it follows.
-  Not verified: a real Parsec or Steam Remote Play stream. The Linux PipeWire sink
-  (`steam-streaming-playback`) would be a firmer Steam signal if the end line proves unreliable.
-- Wolf dropped (2026-11-15): it runs games in Docker containers, mostly on headless multi-user
-  servers. Following its sessions worked only with a root-owned socket opened up after every Wolf
-  start, and devices plugged into the host still would not reach its containers, so it gave its
-  users nothing. Its forwarding also needs container placement, which is a project of its own.
-
-## 6. Verification policy
-
-- Unit tests for what can be checked without hardware: `/serverinfo` parsing against captured
-  responses from each fork, prep-command config merging, lease logic, frame encoding, translation
-  profiles against captured reports (round trip and CRC).
-- A real-hardware matrix per release: relay OS × host OS × host app × device, filled from actual
-  runs. README tables list only those rows. Racing wheels with force feedback stay the first
-  device in every matrix.
-- Fork behavior is probed, not assumed: the adapter logs which signals it found, and `doctor`
-  shows them.
-
-## 7. Open questions and risks
-
-- Does every listed fork keep `currentgame` in `/serverinfo` accurate, and on which port? Moonshine,
-  Wolf and Rubylight are the most likely to differ.
-- Rubylight's HTTP API and webhooks are not yet read; they may be a better signal than polling.
-- Wolf: whether its API exposes session events in a stable form, and how hotplugged devices reach a
-  running app container.
-- Steam Remote Play on Windows: which `streaming_log.txt` lines mark start and end.
-- Xbox Wireless controllers on a Windows host via synthesized USB: which driver Windows binds.
-- Windows prep-command user context per fork (elevated or not, which account).
-- BlueZ versions on older relay distributions, and controllers that need a vendor-specific
-  pairing sequence.
-
-## 8. Sources
+## 6. Survey sources
 
 - Sunshine: [repository](https://github.com/LizardByte/Sunshine), [API docs](https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2api.html), `src/nvhttp.cpp` and `src/config.cpp` (read 2026-11-14), [issue #2842](https://github.com/LizardByte/Sunshine/issues/2842)
 - Apollo: [repository](https://github.com/ClassicOldSong/Apollo), [Client Commands](https://github.com/ClassicOldSong/Apollo/wiki/Client-Commands), [releases](https://github.com/ClassicOldSong/Apollo/releases)

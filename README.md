@@ -100,8 +100,10 @@ The host gets a copy of the controller with the same ids, so drivers and Steam t
 own: rumble, light bar and motion sensors included. While a host uses it, the relay's desktop
 ignores it.
 
-This needs Linux on both sides. For a Windows host, put a USB Bluetooth adapter in the relay and
-forward the adapter instead.
+Bluetooth HID forwarding needs Linux on both sides. For a Windows host, plug a USB Bluetooth
+adapter into the relay and attach it through Plugover. Pair the controller in Windows Bluetooth
+settings while the adapter is attached. Choose **Always** to keep the adapter connected between
+streams.
 
 ## Commands
 
@@ -127,7 +129,9 @@ plugover unpair desktop        # remove a host
 plugover share 046d:c24f on    # share only listed devices (share --all to undo)
 ```
 
-Devices are named by USB id (`vendor:product`, see `plugover status`). Hubs, storage and network
+The CLI uses USB IDs (`vendor:product`, see `plugover status`). To tell identical devices apart,
+open a device’s details in the console and give it a name. Plugover remembers the name by serial
+number when available and unique, or by model and port on that relay. Hubs, storage and network
 adapters are never shared. On Windows, run `ui` and `session` from an administrator terminal.
 
 ## Compatibility

@@ -90,7 +90,7 @@ fn check_relay(state_path: &Path) -> bool {
                 ok("Paired hosts", names.join(", "));
             }
             match &st.share {
-                None => ok("Sharing", "every device except hubs and storage"),
+                None => ok("Sharing", "all eligible devices"),
                 Some(l) if l.is_empty() => warn("Sharing", "nothing", Some(&format!("{} to share a device", cmd(&sudo("plugover share <id> on"))))),
                 Some(l) => ok("Sharing", format!("only {}", l.join(", "))),
             }

@@ -390,7 +390,7 @@ impl Relay {
         let (r, mut w) = tls::wrap(s.try_clone()?, s.try_clone()?, &key, &nonce, true);
         let req: proto::RelayRequest = proto::recv(&mut BufReader::new(r))?;
         let result = match req {
-            proto::RelayRequest::Take { busid } => self.take(&busid, &host).map(|()| None),
+            proto::RelayRequest::Take { busid, expected_owner } => self.take(&busid, &host, expected_owner.as_deref()).map(|()| None),
             other => bluetooth(other, &host.name),
         };
         let reply = match &result {
@@ -402,15 +402,17 @@ impl Relay {
     }
 
     /// Takes a device back from the host that has it, for `host`, and waits until it is back.
-    fn take(&self, busid: &str, host: &PairedHost) -> Result<()> {
+    fn take(&self, busid: &str, host: &PairedHost, expected_owner: Option<&str>) -> Result<()> {
         {
             let mut lent = self.lent.lock().unwrap();
             let l = lent.get_mut(busid).with_context(|| format!("no host has {busid} from {}", self.name))?;
             ensure!(l.host_id != host.id, "{} has {busid} already", host.name);
+            ensure!(expected_owner.is_none_or(|owner| owner == l.host), "{} now has {busid}; check the device before taking over", l.host);
+            ensure!(!l.taken, "{busid} is already being taken over");
             eprintln!("{} takes {busid} over from {}", host.name, l.host);
             l.taken = true;
+            self.promised.lock().unwrap().insert(busid.into(), (host.id.clone(), host.name.clone(), Instant::now()));
         }
-        self.promised.lock().unwrap().insert(busid.into(), (host.id.clone(), host.name.clone(), Instant::now()));
         for _ in 0..30 {
             self.tend();
             if !self.lent.lock().unwrap().contains_key(busid) {
@@ -470,13 +472,15 @@ impl Relay {
     }
 
     fn snapshot(&self, st: &RelayState, bluetooth: bool) -> Result<Snapshot> {
-        let mut lent: HashMap<String, String> = self.lent.lock().unwrap().iter().map(|(b, l)| (b.clone(), l.host.clone())).collect();
+        let loans = self.lent.lock().unwrap();
+        let mut lent: HashMap<String, (String, bool)> = loans.iter().map(|(b, l)| (b.clone(), (l.host.clone(), false))).collect();
         // A device taken over shows as the new host's while it waits for it, so others leave it.
         for (busid, (_, name, at)) in self.promised.lock().unwrap().iter() {
             if at.elapsed() < PROMISE {
-                lent.entry(busid.clone()).or_insert_with(|| name.clone());
+                lent.entry(busid.clone()).or_insert_with(|| (name.clone(), true));
             }
         }
+        drop(loans);
         let mut known = self.known.lock().unwrap();
         let mut devices: Vec<DeviceInfo> = self
             .devices()?
@@ -499,7 +503,8 @@ impl Relay {
                     id,
                     identity,
                     // Attached but not by us: WSL or another USB/IP client on Windows.
-                    lent_to: lent.get(&d.busid).cloned().or_else(|| attached.then(|| "another USB/IP client".into())),
+                    lent_to: lent.get(&d.busid).map(|(name, _)| name.clone()).or_else(|| attached.then(|| "another USB/IP client".into())),
+                    reserved: lent.get(&d.busid).is_some_and(|(_, reserved)| *reserved),
                     serial: d.serial.clone(),
                 }
             })
@@ -509,7 +514,8 @@ impl Relay {
                 let id = format!("{:04x}:{:04x}", d.info.vid, d.info.pid);
                 let name = catalog::catalog_title(&id).unwrap_or_else(|| d.info.name.clone());
                 devices.push(DeviceInfo {
-                    lent_to: lent.get(&d.busid).cloned(),
+                    lent_to: lent.get(&d.busid).map(|(name, _)| name.clone()),
+                    reserved: lent.get(&d.busid).is_some_and(|(_, reserved)| *reserved),
                     identity: Identity {
                         title: name.clone(),
                         name,
@@ -618,7 +624,10 @@ impl Relay {
             Some(_) => {
                 match sysfs::export_release(&self.sys, busid) {
                     Ok(()) => eprintln!("{busid} is back from {}", l.host),
-                    Err(e) => eprintln!("could not take back {busid}: {e}"),
+                    Err(e) => {
+                        eprintln!("could not take back {busid}: {e}");
+                        return revoked;
+                    }
                 }
                 false
             }
@@ -840,22 +849,29 @@ mod tests {
             encrypts: true,
             unencrypted: false,
         };
-        let take = |h: &PairedHost| host::request(&paired(h), &proto::RelayRequest::Take { busid: "1-2".into() });
+        let take = |h: &PairedHost, expected_owner: Option<&str>| host::request(&paired(h), &proto::RelayRequest::Take {
+            busid: "1-2".into(), expected_owner: expected_owner.map(Into::into),
+        });
 
         // The desktop has the wheel; the laptop takes it over.
         relay.lent.lock().unwrap().insert(
             "1-2".into(),
             Lend { host_id: desktop.id.clone(), host: desktop.name.clone(), live: true, conn: None, taken: false },
         );
-        assert!(format!("{:#}", take(&desktop).unwrap_err()).contains("has 1-2 already"));
-        take(&laptop).unwrap();
+        assert!(format!("{:#}", take(&desktop, None).unwrap_err()).contains("has 1-2 already"));
+        assert!(format!("{:#}", take(&laptop, Some("previous owner")).unwrap_err()).contains("desktop now has 1-2"));
+        assert!(!relay.lent.lock().unwrap()["1-2"].taken, "a stale confirmation leaves the loan in place");
+        assert!(relay.promised.lock().unwrap().is_empty());
+        take(&laptop, Some("desktop")).unwrap();
         assert!(relay.lent.lock().unwrap().is_empty(), "the desktop lost it");
-        assert!(format!("{:#}", take(&desktop).unwrap_err()).contains("no host has 1-2"), "nothing to take back now");
+        assert!(format!("{:#}", take(&desktop, None).unwrap_err()).contains("no host has 1-2"), "nothing to take back now");
 
         // Meanwhile it shows as the laptop's, and only the laptop may have it.
         let mut seen = None;
         host::watch(&paired(&desktop), |snap| { seen = Some(snap); false }, |_| {}).unwrap();
-        assert_eq!(seen.unwrap().devices[0].lent_to.as_deref(), Some("laptop"));
+        let taken = &seen.as_ref().unwrap().devices[0];
+        assert_eq!(taken.lent_to.as_deref(), Some("laptop"));
+        assert!(taken.reserved);
         let (a, _b) = net::loopback().unwrap();
         let Err(err) = relay.reserve("1-2", &desktop, &a) else { panic!("the desktop got it back") };
         assert!(format!("{err:#}").contains("taken over by laptop"), "{err:#}");
@@ -871,7 +887,7 @@ mod tests {
                 let _ = c.read_exact(&mut [0u8; 4]);
             }
         });
-        let err = host::request(&too_old, &proto::RelayRequest::Take { busid: "1-2".into() }).unwrap_err();
+        let err = host::request(&too_old, &proto::RelayRequest::Take { busid: "1-2".into(), expected_owner: None }).unwrap_err();
         assert!(format!("{err:#}").contains("older than 0.7"), "{err:#}");
         let _ = fs::remove_dir_all(root);
     }

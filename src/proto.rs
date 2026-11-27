@@ -88,7 +88,11 @@ pub struct Pong {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum RelayRequest {
     /// Take the device back from the host that has it and keep it for this one for a few seconds.
-    Take { busid: String },
+    Take {
+        busid: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_owner: Option<String>,
+    },
     /// Look for Bluetooth input devices for `seconds`; the reply lists them.
     BtScan { seconds: u64 },
     /// Pair, trust and connect the Bluetooth device at `address`.
@@ -153,8 +157,11 @@ pub struct DeviceInfo {
     pub id: String,
     #[serde(flatten)]
     pub identity: Identity,
-    /// Name of the host that has it right now.
+    /// Name of the host that has it or has reserved it.
     pub lent_to: Option<String>,
+    /// The host has reserved the device during a takeover and has yet to connect it.
+    #[serde(default)]
+    pub reserved: bool,
     /// Its USB serial number, when it has a real one; older relays send none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial: Option<String>,

@@ -403,22 +403,8 @@ fn run(cli: Cli) -> Result<()> {
                 Some(p) => format!("{} on port {}", paint(ACCENT, &device), paint(BOLD, p)),
                 None => paint(ACCENT, &device),
             };
-            let always = on && {
-                let st: api::Status = hostd::ask(&cli.socket, &Request::Status)?;
-                // Plugged into the relay, the daemon says; otherwise the mode does.
-                let id = state::device_id(&device)?;
-                let shown = st.relays.iter().flat_map(|r| &r.devices).find(|d| d.info.id == id && d.auto).map(|d| d.always);
-                shown.unwrap_or(match mode.unwrap_or_default() {
-                    state::Mode::Always => true,
-                    state::Mode::Session => false,
-                    state::Mode::Auto => !st.watching,
-                })
-            };
-            done(match (on, always) {
-                (false, _) => format!("Auto-connect is off for {what}."),
-                (true, true) => format!("{what} stays connected, with or without a stream."),
-                (true, false) => format!("{what} connects whenever a stream runs."),
-            });
+            let setting = if on { "on" } else { "off" };
+            done(format!("Auto-connect is {setting} for {what}."));
         }
         Cmd::Ui => {
             anyhow::ensure!(!ui::UI.is_empty(), "this build of Plugover has no page inside; release builds from scripts/build.sh do");
@@ -463,7 +449,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Attach { busid, relay, take } => {
-            let v = call(Request::Attach { relay, busid: busid.clone(), take })?;
+            let v = call(Request::Attach { relay, busid: busid.clone(), take, expected_owner: None })?;
             done(format!("Connected {} (virtual port {}).", paint(BOLD, busid), v["port"]));
         }
         Cmd::Desktop { device, state } => {
