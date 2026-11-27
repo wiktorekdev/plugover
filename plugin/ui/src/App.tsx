@@ -109,7 +109,6 @@ export function App() {
 	};
 	const forgot = (id: string) => {
 		if (pendingPairings.current.delete(id)) setWaitingFor([...pendingPairings.current.values()]);
-		return refresh();
 	};
 
 	// The next poll waits for the last answer, so a slow daemon is not sent a pile of requests.
@@ -447,14 +446,18 @@ function BackLink({ onClick, disabled }: { onClick: () => void; disabled?: boole
 	);
 }
 
+/** Resolves to whether the operation succeeded; refreshes either way. */
 async function act(op: string, body: object, done: string | undefined, refresh: () => Promise<void>) {
+	let ok = false;
 	try {
 		await call(op, body);
 		if (done) toast.success(done);
+		ok = true;
 	} catch (e) {
 		toast.error((e as Error).message);
 	}
 	await refresh();
+	return ok;
 }
 
 function RelayView({
@@ -476,7 +479,7 @@ function RelayView({
 	screens: boolean;
 	refresh: () => Promise<void>;
 	onPaired: (relay: PairedRelay) => void;
-	onForgot: (id: string) => Promise<void>;
+	onForgot: (id: string) => void;
 }) {
 	// Game devices come first, in a fixed order, so rows do not jump around when turned on or off.
 	const devices = relay.devices.filter((d) => !d.blocked).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.title.localeCompare(b.title));
@@ -550,7 +553,7 @@ function RelayView({
 						<Button size="sm" variant="ghost" onClick={() => setRepairing(true)}>
 							Pair again
 						</Button>
-						<ForgetButton relay={relay} refresh={() => onForgot(relay.id)} />
+						<ForgetButton relay={relay} refresh={refresh} onForgot={() => onForgot(relay.id)} />
 					</div>
 				)}
 			</div>
@@ -1119,7 +1122,7 @@ function MissingRow({ relay, device: m, refresh }: { relay: Relay; device: Missi
 	);
 }
 
-function ForgetButton({ relay, refresh }: { relay: Relay; refresh: () => Promise<void> }) {
+function ForgetButton({ relay, refresh, onForgot }: { relay: Relay; refresh: () => Promise<void>; onForgot: () => void }) {
 	const [confirming, setConfirming] = useState(false);
 	if (!confirming) {
 		return (
@@ -1131,7 +1134,7 @@ function ForgetButton({ relay, refresh }: { relay: Relay; refresh: () => Promise
 	return (
 		<span role="alert" className="flex flex-wrap items-center justify-end gap-2">
 			Forget {relay.name}? Its devices and your choices for them go until you pair again.
-			<Button size="sm" variant="destructive" onClick={() => act("forget", { relay: relay.id }, `Removed ${relay.name}`, refresh)}>
+			<Button size="sm" variant="destructive" onClick={async () => (await act("forget", { relay: relay.id }, `Removed ${relay.name}`, refresh)) && onForgot()}>
 				Forget
 			</Button>
 			<Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
