@@ -7,6 +7,9 @@ use anstream::println;
 use std::os::unix::fs::MetadataExt;
 
 const RELAY_BIN: &str = "/usr/local/bin/plugover";
+/// SteamOS keeps /usr read-only and replaces it on every update, so there the binary lives with
+/// the relay's state.
+const RELAY_BIN_STEAMOS: &str = "/var/lib/plugover/plugover";
 /// Where distribution packages (AUR, .deb) put the binary; setup then uses it in place.
 const PACKAGED: &str = "/usr/bin/plugover";
 const RELAY_UNIT: &str = "/etc/systemd/system/plugover-relay.service";
@@ -32,8 +35,17 @@ fn packaged() -> bool {
     is_me(Path::new(PACKAGED))
 }
 
+fn own_relay_bin() -> &'static str {
+    if os_id().as_deref() == Some("steamos") { RELAY_BIN_STEAMOS } else { RELAY_BIN }
+}
+
 fn relay_bin() -> &'static str {
-    if packaged() { PACKAGED } else { RELAY_BIN }
+    if packaged() { PACKAGED } else { own_relay_bin() }
+}
+
+fn os_id() -> Option<String> {
+    let text = fs::read_to_string("/etc/os-release").ok()?;
+    text.lines().find_map(|l| l.strip_prefix("ID=").map(|v| v.trim_matches('"').to_string()))
 }
 
 fn host_bin() -> PathBuf {
@@ -691,7 +703,7 @@ fn plan_uninstall(found: &Found, ctx: &Ctx) -> Result<Plan> {
 
 fn remove_relay(purge: bool) -> Result<()> {
     // A package's binary stays for the package manager to remove.
-    let ours = unit_bin(Path::new(RELAY_UNIT)).is_some_and(|b| b == Path::new(RELAY_BIN));
+    let ours = unit_bin(Path::new(RELAY_UNIT)).filter(|b| [RELAY_BIN, RELAY_BIN_STEAMOS].iter().any(|own| b == Path::new(own)));
     let _ = root("systemctl", &["disable", "--now", "plugover-relay"]);
     // A firewall that has gone away since should not leave the rest half removed.
     if let Err(e) = close_firewall() {
@@ -699,8 +711,8 @@ fn remove_relay(purge: bool) -> Result<()> {
     }
     root("rm", &["-f", RELAY_UNIT, &modules_file("usbip-host"), &format!("{NFT_CONF}.plugover-backup")])?;
     forget_old_module("usbip-host")?;
-    if ours {
-        root("rm", &["-f", RELAY_BIN])?;
+    if let Some(bin) = ours {
+        root("rm", &["-f", &bin.to_string_lossy()])?;
     }
     root("systemctl", &["daemon-reload"])?;
     if purge {
