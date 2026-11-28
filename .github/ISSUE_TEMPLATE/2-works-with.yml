@@ -1,0 +1,48 @@
+name: It works (or not) with my setup
+description: Tell us how Plugover ran on your hardware, so others know what to expect
+labels: [compatibility]
+title: "Works with: "
+body:
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options: [Works, Works with problems, Does not work]
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: Logitech G29, Fanatec CSL DD, DualSense...
+    validations:
+      required: true
+  - type: dropdown
+    id: relay
+    attributes:
+      label: Relay
+      options: [Linux PC, Raspberry Pi or other ARM board, Windows]
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host
+      options: [Linux, Windows]
+    validations:
+      required: true
+  - type: dropdown
+    id: app
+    attributes:
+      label: Streaming app
+      options: [punktfunk, Sunshine or a fork, Parsec, Steam Remote Play, None]
+  - type: input
+    id: version
+    attributes:
+      label: Plugover version
+      placeholder: "0.9.0"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Force feedback, vendor software, latency, anything you had to do to get it working.

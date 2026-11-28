@@ -1,0 +1,61 @@
+name: Something doesn't work
+description: A device won't connect, setup fails, something crashes
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Run `plugover doctor` on both machines first. It often says exactly what to fix.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Plugover version
+      description: "`plugover --version`"
+      placeholder: "0.9.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: relay
+    attributes:
+      label: Relay (where the device is plugged in)
+      options: [Linux PC, Raspberry Pi or other ARM board, Windows]
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host (the gaming PC)
+      options: [Linux, Windows]
+    validations:
+      required: true
+  - type: dropdown
+    id: app
+    attributes:
+      label: Streaming app
+      options: [punktfunk, Sunshine or a fork, Parsec, Steam Remote Play, None]
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Name and ID from `plugover status`
+      placeholder: 046d:c24f Logitech G29
+  - type: textarea
+    id: relay-report
+    attributes:
+      label: Report from the relay
+      description: Paste the output of `plugover doctor --report`. It has host names and addresses, no keys.
+      render: text
+  - type: textarea
+    id: host-report
+    attributes:
+      label: Report from the host
+      description: Same command, on the gaming PC.
+      render: text

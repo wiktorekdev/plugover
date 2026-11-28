@@ -1,5 +1,5 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
-  - name: Security vulnerability
+  - name: Security problem
     url: https://github.com/wiktorekdev/plugover/security/advisories/new
     about: Report it privately, not in a public issue

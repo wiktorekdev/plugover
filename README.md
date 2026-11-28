@@ -43,12 +43,12 @@ Bluetooth controllers can be paired with the relay too (Linux on both sides).
 Linux relay and host, Windows host, punktfunk, Sunshine on Linux, Logitech G29, DualShock 4.
 
 Not tested yet: Raspberry Pi, Windows relay, Sunshine on Windows, Parsec, Steam Remote Play.
-[Tell us](https://github.com/wiktorekdev/plugover/issues/new?template=compatibility.md) how it went.
+[Tell us](https://github.com/wiktorekdev/plugover/issues/new?template=2-works-with.yml) how it went.
 
 ## Help
 
 `plugover doctor` on both machines says what is wrong. `plugover --help` lists every command.
-Still stuck? [Open an issue](https://github.com/wiktorekdev/plugover/issues/new?template=bug_report.md)
+Still stuck? [Open an issue](https://github.com/wiktorekdev/plugover/issues/new?template=1-bug.yml)
 with `plugover doctor --report` from both machines.
 
 Security details are in [SECURITY.md](SECURITY.md).
