@@ -5,6 +5,7 @@
 #   installer.sh, installer.ps1              download the binary of this release and run setup
 #   plugover_<version>_{amd64,arm64,armhf}.deb   Debian packages
 #   winget/                                  manifests for a microsoft/winget-pkgs pull request
+#   aur/                                     PKGBUILD for the plugover-bin AUR package
 #   SHA256SUMS, SHA256SUMS.sig                checksums, signed with the release key
 # The console plugin is built first and goes inside every binary.
 set -euo pipefail
@@ -42,6 +43,7 @@ fill() {
         -e "s#__SHA_X86_64__#$(sha "dist/plugover-$version-linux-x86_64")#" \
         -e "s#__SHA_AARCH64__#$(sha "dist/plugover-$version-linux-aarch64")#" \
         -e "s#__SHA_ARMV7__#$(sha "dist/plugover-$version-linux-armv7")#" \
+        -e "s#__SHA_LICENSE__#$(sha LICENSE)#" \
         -e "s#__ARCH__#${deb_arch:-}#" "$1" >"$2"
     if grep -n '__[A-Z_0-9]*__' "$2"; then exit 1; fi
 }
@@ -50,6 +52,7 @@ fill packaging/installer.ps1 dist/installer.ps1
 
 # Packages. Nothing here publishes them; the winget manifests go to winget-pkgs by hand.
 for f in packaging/winget/*.yaml; do fill "$f" "dist/winget/$(basename "$f")"; done
+mkdir -p dist/aur && fill packaging/aur/PKGBUILD dist/aur/PKGBUILD && cp packaging/aur/plugover.install dist/aur/
 for arch in "${!linux[@]}"; do
     root=target/deb/${debian[$arch]}
     rm -rf "$root" && mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/doc/plugover"

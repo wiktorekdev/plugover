@@ -8,11 +8,16 @@ PackageName: Plugover
 PackageUrl: https://github.com/wiktorekdev/plugover
 License: MIT
 LicenseUrl: https://github.com/wiktorekdev/plugover/blob/main/LICENSE
-ShortDescription: Hands USB devices plugged into one machine to a punktfunk host over the network.
+ShortDescription: Use USB wheels, pedals and controllers on the PC you stream games from.
 Description: Run `plugover setup` after installing to set this computer up as the relay or the host.
 Tags:
 - usb
 - usbip
+- usb-over-ip
+- game-streaming
+- sunshine
+- moonlight
 - punktfunk
+- racing-wheel
 ManifestType: defaultLocale
 ManifestVersion: 1.9.0

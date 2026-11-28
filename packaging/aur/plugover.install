@@ -1,0 +1,15 @@
+post_install() {
+    echo "Run 'plugover setup' to set this computer up as the relay or the host."
+}
+
+post_upgrade() {
+    echo "Run 'plugover setup --relay' or 'plugover setup --host' again to restart Plugover on the new version."
+}
+
+pre_remove() {
+    # The relay service runs this package's binary; take it down cleanly before the binary goes.
+    if [ -f /etc/systemd/system/plugover-relay.service ] && grep -q '^ExecStart=/usr/bin/plugover ' /etc/systemd/system/plugover-relay.service; then
+        /usr/bin/plugover setup --uninstall --yes || echo "Could not remove the Plugover relay service; run 'plugover setup --uninstall' first."
+    fi
+    echo "If this computer is a Plugover host, run 'systemctl --user disable --now plugover-host' as your user."
+}

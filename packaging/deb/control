@@ -5,5 +5,5 @@ Maintainer: wiktorekdev <https://github.com/wiktorekdev/plugover>
 Section: utils
 Priority: optional
 Homepage: https://github.com/wiktorekdev/plugover
-Description: Hands USB devices plugged into one machine to a punktfunk host over the network
+Description: Use USB wheels, pedals and controllers on the PC you stream games from
  Run `plugover setup` after installing to set this computer up as the relay or the host.

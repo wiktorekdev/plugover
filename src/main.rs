@@ -43,7 +43,7 @@ const SUDO: &str = "run it again as administrator";
 const SUDO: &str = "run it again with sudo";
 
 #[derive(Parser)]
-#[command(version, styles = term::CLAP, about = "Hands USB devices plugged into one machine to a punktfunk host")]
+#[command(version, styles = term::CLAP, about = "Use USB wheels, pedals and controllers on the PC you stream games from")]
 struct Cli {
     /// Where the host daemon listens: its socket on Linux, its token file on Windows.
     #[arg(long, global = true, default_value_os_t = endpoint())]
